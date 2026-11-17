@@ -10,6 +10,7 @@ pub const desktop = "/org/freedesktop/portal/desktop";
 pub const Msg = dbus.Msg;
 
 const dbus_service = "org.freedesktop.DBus";
+const dbus_path = "/org/freedesktop/DBus";
 
 pub const Text = struct {
     buf: [256]u8 = @splat(0),
@@ -156,6 +157,17 @@ pub const Bus = struct {
             !eql(b.d.dbus_message_get_sender(msg), dbus_service)) return false;
         var args = b.input(msg);
         return eql(args.str('s'), service);
+    }
+
+    pub fn owner(b: *Bus, name: *Text) bool {
+        const msg = b.d.dbus_message_new_method_call(dbus_service, dbus_path, dbus_service, "GetNameOwner") orelse return false;
+        defer b.free(msg);
+        var args = b.output(msg);
+        args.put('s', service);
+        const reply = b.call(msg) orelse return false;
+        defer b.free(reply);
+        var result = b.input(reply);
+        return name.set(result.str('s') orelse return false);
     }
 
     pub fn method(b: *Bus, path: [*:0]const u8, iface: [*:0]const u8, name: [*:0]const u8) ?*Msg {
