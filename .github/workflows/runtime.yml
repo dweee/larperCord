@@ -169,20 +169,21 @@ jobs:
         run: |
           open -n -a "$PWD/app/Applications/larperCord.app" --args --demo
           sleep 20
-          pgrep -fl 'larperCord.app/Contents/MacOS/.larpercord-wrapped'
+          pgrep -fl 'larperCord.app/Contents/MacOS/larpercord'
           screencapture -x shots/macos-screen.png
           osascript -e 'tell application id "dev.larpercord" to quit' || true
           sleep 5
-          pkill -f 'larperCord.app/Contents/MacOS/.larpercord-wrapped' || true
+          pkill -f 'larperCord.app/Contents/MacOS/larpercord' || true
       - name: Home Manager launchd agent starts the token bundle, which passes the token
         timeout-minutes: 5
         run: |
           printf 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token' > /tmp/larpercord-check-token
           plist="$PWD/hm-activation/LaunchAgents/dev.larpercord.plist"
           plutil -lint "$plist"
+          # The binary wrapper keeps argv[0], so the process shows as …/MacOS/larpercord.
           launchctl bootstrap "gui/$(id -u)" "$plist"
-          for _ in $(seq 30); do pgrep -f 'larperCord.app/Contents/MacOS/.larpercord-wrapped' && break; sleep 1; done
-          pid=$(pgrep -f 'larperCord.app/Contents/MacOS/.larpercord-wrapped' | head -1)
+          for _ in $(seq 30); do pgrep -f 'larperCord.app/Contents/MacOS/larpercord' && break; sleep 1; done
+          pid=$(pgrep -f 'larperCord.app/Contents/MacOS/larpercord' | head -1)
           test -n "$pid"
           ps eww -o command= -p "$pid" | grep -q 'LARPER_TOKEN=MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token'
           sleep 10
@@ -190,7 +191,7 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.larpercord" || true
           osascript -e 'tell application id "dev.larpercord" to quit' || true
           sleep 5
-          pkill -f 'larperCord.app/Contents/MacOS/.larpercord-wrapped' || true
+          pkill -f 'larperCord.app/Contents/MacOS/larpercord' || true
           rm -f /tmp/larpercord-check-token
       - name: Probe the client's Keychain, FFmpeg and link-opening code
         timeout-minutes: 5
