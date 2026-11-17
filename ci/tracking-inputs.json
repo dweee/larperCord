@@ -4,6 +4,9 @@
     "home-manager": {
       "source": "github:nix-community/home-manager"
     },
+    "nix-darwin": {
+      "source": "github:nix-darwin/nix-darwin"
+    },
     "nixpkgs": {
       "source": "github:NixOS/nixpkgs/nixos-unstable"
     }
