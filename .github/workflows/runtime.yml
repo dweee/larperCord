@@ -1,0 +1,247 @@
+# Tests that do not depend on the Niks3 cache: every flake check on each native
+# system, the NixOS VM test (needs KVM), the Nix-built Windows package on a real
+# Windows runner and the macOS app in a real GUI session. The release workflow
+# builds the same packages and checks again before it publishes and promotes
+# `tested`.
+name: Runtime tests
+"on":
+  push:
+    branches: [flakey]
+    paths-ignore: ["**/*.md", "docs/**", "site/**"]
+  pull_request:
+    paths-ignore: ["**/*.md", "docs/**", "site/**"]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  flake-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-15
+    name: flake check (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: Build every package and check for this system
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$SYSTEM"
+          nix flake check --no-write-lock-file -L --system "$SYSTEM"
+          nix build --no-write-lock-file -L --no-link ".#packages.$SYSTEM.larpercord"
+
+  nixos-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: true
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: NixOS module VM test
+        run: |
+          nix build .#tests.x86_64-linux.nixos-vm --no-write-lock-file -L --out-link vm-result
+          cp vm-result/shot.png nixos-vm-shot.png
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nixos-vm-shot
+          path: nixos-vm-shot.png
+          retention-days: 7
+
+  windows-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: Cross-compile the Windows package with Zig
+        run: |
+          nix build .#larpercord-windows --no-write-lock-file -L --out-link win
+          cp win/larpercord-windows-x86_64.zip .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: larpercord-windows-x86_64
+          path: larpercord-windows-x86_64.zip
+          retention-days: 7
+
+  windows-runtime:
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: larpercord-windows-x86_64
+      - name: Draw one frame of the demo
+        shell: pwsh
+        env:
+          SDL_VIDEO_DRIVER: windows
+          LARPER_RENDERER: software
+        run: |
+          Expand-Archive larpercord-windows-x86_64.zip -DestinationPath app
+          $env:APPDATA = Join-Path $PWD 'appdata'
+          $env:LOCALAPPDATA = Join-Path $PWD 'localappdata'
+          $shot = Join-Path $PWD 'windows-shot.png'
+          $p = Start-Process -FilePath app\larpercord.exe -ArgumentList '--theme','classico','--shot',$shot -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          Get-Content out.txt,err.txt -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "larpercord.exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 20000) { throw "no screenshot" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-shot
+          path: windows-shot.png
+          retention-days: 7
+
+  # The app on a real Mac (GitHub's macos-15 runners have a logged-in GUI
+  # session and an unlocked login Keychain): launched through LaunchServices;
+  # the Home Manager copy installed, signed with a stable Keychain identity and
+  # started by the launchd agent with the token path; and the client's own
+  # Keychain, FFmpeg and link-opening code run by a probe.
+  macos-runtime:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: Build the app, the Home Manager token bundle and agent, and the probe
+        run: |
+          nix build --no-write-lock-file -L --out-link app .#larpercord
+          nix build --no-write-lock-file -L --out-link hm-installer .#checks.aarch64-darwin.home-manager-module.installer
+          nix build --no-write-lock-file -L --out-link hm-activation .#checks.aarch64-darwin.home-manager-module.activation
+          nix develop --no-write-lock-file -c bash nix/macos-probe/build.sh "$RUNNER_TEMP/probe"
+          mkdir -p shots
+      - name: TLS and WebSocket support of the bundled libcurl
+        run: app/bin/larpercord --tls-check https://discord.com/api/v10/gateway
+      - name: Open the bundle through LaunchServices and draw one frame
+        timeout-minutes: 5
+        run: |
+          open -n -W -a "$PWD/app/Applications/larperCord.app" --args --theme classico --shot "$PWD/shots/macos-open-shot.png"
+          file shots/macos-open-shot.png | grep -q 'PNG image data'
+          test "$(stat -f %z shots/macos-open-shot.png)" -gt 20000
+      - name: Run the demo and capture the screen (window and menu bar icon)
+        timeout-minutes: 5
+        run: |
+          open -n -a "$PWD/app/Applications/larperCord.app" --args --demo
+          sleep 20
+          pgrep -fl 'larperCord.app/Contents/MacOS/larpercord'
+          screencapture -x shots/macos-screen.png
+          osascript -e 'tell application id "dev.larpercord" to quit' || true
+          sleep 5
+          pkill -f 'larperCord.app/Contents/MacOS/larpercord' || true
+      - name: Install the Home Manager copy, sign it like monke-tcc-sign, start it from the launchd agent
+        timeout-minutes: 8
+        run: |
+          # A self-signed code-signing identity in the login Keychain, made the way
+          # flakey's monke-tcc-sign makes "rotna Code Signing".
+          tmp=$(mktemp -d)
+          printf '%s\n' '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
+            '[dn]' 'CN = larperCord CI Code Signing' '[v3]' 'basicConstraints = CA:false' \
+            'keyUsage = digitalSignature' 'extendedKeyUsage = codeSigning' > "$tmp/cs.cnf"
+          /usr/bin/openssl req -new -x509 -days 2 -nodes -config "$tmp/cs.cnf" -keyout "$tmp/key.pem" -out "$tmp/cert.pem"
+          pass=$(uuidgen)
+          /usr/bin/openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -out "$tmp/cs.p12" \
+            -passout "pass:$pass" -name 'larperCord CI Code Signing'
+          security import "$tmp/cs.p12" -k "$HOME/Library/Keychains/login.keychain-db" -P "$pass" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -rf "$tmp"
+          security find-identity -p codesigning | grep -F 'larperCord CI Code Signing'
+
+          # What activation does (the check config's signer only records the call),
+          # then the real signature on the installed copy.
+          ./hm-installer
+          app="$HOME/Applications/larperCord.app"
+          codesign --force --sign 'larperCord CI Code Signing' --identifier dev.larpercord --timestamp=none "$app"
+          codesign --verify --verbose "$app"
+          codesign -d -r- "$app" 2>&1 | tee codesign.txt
+          grep -q 'identifier "dev.larpercord"' codesign.txt
+          grep -q 'certificate leaf' codesign.txt
+
+          printf 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token' > /tmp/larpercord-check-token
+          chmod 600 /tmp/larpercord-check-token
+          plist="$PWD/hm-activation/LaunchAgents/dev.larpercord.plist"
+          plutil -lint "$plist"
+          launchctl bootstrap "gui/$(id -u)" "$plist"
+          for _ in $(seq 30); do pgrep -f "$app/Contents/MacOS/larpercord" && break; sleep 1; done
+          pid=$(pgrep -f "$app/Contents/MacOS/larpercord" | head -1)
+          test -n "$pid"
+          # LSEnvironment from the installed Info.plist: the path, not the token.
+          ps eww -o command= -p "$pid" | grep -q 'LARPER_TOKEN_FILE=/tmp/larpercord-check-token'
+          if ps eww -o command= -p "$pid" | grep -q 'LARPER_TOKEN='; then exit 1; fi
+          sleep 12
+          screencapture -x shots/macos-signed-agent.png
+          launchctl bootout "gui/$(id -u)/dev.larpercord" || true
+          osascript -e 'tell application id "dev.larpercord" to quit' || true
+          sleep 5
+          pkill -f 'larperCord.app/Contents/MacOS/larpercord' || true
+          rm -f /tmp/larpercord-check-token
+      - name: Probe the client's Keychain, FFmpeg and link-opening code
+        timeout-minutes: 5
+        run: |
+          probe_app="$RUNNER_TEMP/Probe.app"
+          mkdir -p "$probe_app/Contents/MacOS"
+          ln -s "$PWD/app/Applications/larperCord.app/Contents/Frameworks" "$probe_app/Contents/Frameworks"
+          cp "$RUNNER_TEMP/probe" "$probe_app/Contents/MacOS/probe"
+          "$probe_app/Contents/MacOS/probe" ffmpeg 2>&1 | tee probe-ffmpeg.txt
+          grep -q 'Probe.app/Contents/MacOS/../Frameworks' probe-ffmpeg.txt
+          "$RUNNER_TEMP/probe" keychain
+          if security find-generic-password -s larpercord-ci-test >/dev/null 2>&1; then exit 1; fi
+          echo 'opened by larperCord CI' > "$RUNNER_TEMP/open-probe.txt"
+          "$RUNNER_TEMP/probe" open "file://$RUNNER_TEMP/open-probe.txt"
+          for _ in $(seq 20); do pgrep -x TextEdit && break; sleep 1; done
+          pgrep -x TextEdit
+          sleep 3
+          screencapture -x shots/macos-open-url.png
+          osascript -e 'quit app "TextEdit"' || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: macos-shots
+          path: shots/
+          retention-days: 7

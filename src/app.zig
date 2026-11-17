@@ -2603,10 +2603,18 @@ pub const App = struct {
         app.desktopNotify(title, body);
     }
 
-    /// Uma notificação do sistema: notify-send no Linux, o aviso da bandeja no Windows.
+    /// Uma notificação do sistema: notify-send no Linux, o aviso da bandeja no Windows,
+    /// o `display notification` do AppleScript no macOS.
     pub fn desktopNotify(app: *App, title: [:0]const u8, body: [:0]const u8) void {
         if (app.notifiers.items.len >= 8) return;
         if (sys.windows) return sys.toast(c.SDL_GetPointerProperty(c.SDL_GetWindowProperties(app.win.window), c.SDL_PROP_WINDOW_WIN32_HWND_POINTER, null), now(), title, body);
+        if (sys.macos) {
+            // Título e texto como argumentos do script, nunca dentro dele.
+            var mac_args = [_:null]?[*:0]const u8{ "/usr/bin/osascript", "-e", "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run", "--", title.ptr, body.ptr };
+            const mac_proc = c.SDL_CreateProcess(@ptrCast(&mac_args), false) orelse return;
+            app.notifiers.append(app.gpa, mac_proc) catch c.SDL_DestroyProcess(mac_proc);
+            return;
+        }
         // O ícone pelo nome: o do mascote escolhido (ver applyMascot e icone_sistema).
         var args = [_:null]?[*:0]const u8{ "notify-send", "--app-name=larperCord", "--icon=larpercord", "--", title.ptr, body.ptr };
         const proc = c.SDL_CreateProcess(@ptrCast(&args), false) orelse return;

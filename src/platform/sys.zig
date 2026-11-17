@@ -1,4 +1,4 @@
-//! O que muda entre Linux e Windows: sockets, pasta de dados, chaveiro, RAM,
+//! O que muda entre Linux, macOS e Windows: sockets, pasta de dados, chaveiro, RAM,
 //! mapear arquivos, trava de instância, bandeja e avisos do sistema. O resto do
 //! app fala com estas funções.
 const std = @import("std");
@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const c = @import("c");
 
 pub const windows = builtin.os.tag == .windows;
+pub const macos = builtin.os.tag == .macos;
 /// A demonstração no navegador (src/web_main.zig): sem threads, sem rede e sem as
 /// fontes do sistema. Quem decide é a raiz do build; o app de sempre nunca liga isto.
 pub const web = @hasDecl(@import("root"), "larper_web");
@@ -116,8 +117,16 @@ pub fn udpSocket() ?Socket {
         _ = c.ioctlsocket(s, @bitCast(@as(u32, 0x8004667E)), &on);
         return s;
     }
-    const s = c.socket(c.AF_INET, c.SOCK_DGRAM | c.SOCK_CLOEXEC, 0);
+    const s = socketCloexec(c.AF_INET, c.SOCK_DGRAM);
     return if (s < 0) null else s;
+}
+
+/// `socket` que filho nenhum herda. O macOS não tem SOCK_CLOEXEC: lá vai pelo fcntl.
+pub fn socketCloexec(domain: c_int, kind: c_int) c_int {
+    if (!macos) return c.socket(domain, kind | c.SOCK_CLOEXEC, 0);
+    const s = c.socket(domain, kind, 0);
+    if (s >= 0) _ = c.fcntl(s, c.F_SETFD, @as(c_int, c.FD_CLOEXEC));
+    return s;
 }
 
 pub fn recvNow(s: Socket, buf: []u8) isize {
@@ -196,7 +205,7 @@ pub fn wakeSignal(write_end: Socket) void {
 /// Escuta em 127.0.0.1, numa porta livre. No Windows, sem isso o socket é
 /// herdado por quem o app abrir (e a porta fica presa depois de sair).
 pub fn tcpListenLocal(port: *u16) ?Socket {
-    const s = if (windows) c.socket(c.AF_INET, c.SOCK_STREAM, 0) else c.socket(c.AF_INET, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+    const s = if (windows) c.socket(c.AF_INET, c.SOCK_STREAM, 0) else socketCloexec(c.AF_INET, c.SOCK_STREAM);
     if (!valid(s)) return null;
     if (windows) _ = c.SetHandleInformation(@ptrFromInt(s), c.HANDLE_FLAG_INHERIT, 0);
     var addr = ipv4("127.0.0.1", 0) orelse {
@@ -213,7 +222,7 @@ pub fn tcpListenLocal(port: *u16) ?Socket {
 }
 
 pub fn tcpConnectLocal(port: u16) ?Socket {
-    const s = if (windows) c.socket(c.AF_INET, c.SOCK_STREAM, 0) else c.socket(c.AF_INET, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+    const s = if (windows) c.socket(c.AF_INET, c.SOCK_STREAM, 0) else socketCloexec(c.AF_INET, c.SOCK_STREAM);
     if (!valid(s)) return null;
     const addr = ipv4("127.0.0.1", port) orelse {
         closeSocket(s);
@@ -296,7 +305,8 @@ pub fn closeOnExec() void {
 /// libdbus, sem sessão ou sem resposta conta como "não": fechar sai de verdade,
 /// que é o erro seguro.
 pub fn trayHostAvailable() bool {
-    if (windows) return true;
+    // macOS: a barra de menus sempre está lá.
+    if (windows or macos) return true;
     // Fica carregada: o próprio SDL já a usa, e a pergunta se repete com a janela escondida.
     const Lib = struct {
         var handle: ?*c.SDL_SharedObject = null;
@@ -444,25 +454,37 @@ fn env(name: [*:0]const u8) ?[]const u8 {
 }
 
 /// Onde ficam as configurações (sem o "larpercord"): $XDG_CONFIG_HOME,
-/// %APPDATA% ou ~/.config.
+/// %APPDATA% ou ~/.config. No macOS, sempre ~/Library/Application Support: o app
+/// aberto pelo Finder nunca vê as variáveis XDG, e um terminal que as tenha
+/// dividiria as configurações em duas pastas conforme o jeito de abrir.
 pub fn configHome(buf: []u8) ?[]const u8 {
+    if (macos) return homeSub(buf, "Library/Application Support");
     if (env("XDG_CONFIG_HOME")) |x| return x;
     if (windows) return env("APPDATA");
     const home = env("HOME") orelse return null;
     return std.fmt.bufPrint(buf, "{s}/.config", .{home}) catch null;
 }
 
-/// Onde fica o cache: $XDG_CACHE_HOME, %LOCALAPPDATA% ou ~/.cache.
+/// Onde fica o cache: $XDG_CACHE_HOME, %LOCALAPPDATA% ou ~/.cache (no macOS,
+/// sempre ~/Library/Caches, pelo mesmo motivo de `configHome`).
 pub fn cacheHome(buf: []u8) ?[]const u8 {
+    if (macos) return homeSub(buf, "Library/Caches");
     if (env("XDG_CACHE_HOME")) |x| return x;
     if (windows) return env("LOCALAPPDATA");
     const home = env("HOME") orelse return null;
     return std.fmt.bufPrint(buf, "{s}/.cache", .{home}) catch null;
 }
 
+fn homeSub(buf: []u8, sub: []const u8) ?[]const u8 {
+    const home = env("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ home, sub }) catch null;
+}
+
 pub fn tempDir() []const u8 {
     if (env("XDG_RUNTIME_DIR")) |x| return x;
     if (windows) return env("TEMP") orelse ".";
+    // macOS: a pasta temporária do usuário (só dele), não a /tmp de todos.
+    if (macos) return env("TMPDIR") orelse "/tmp";
     return "/tmp";
 }
 
@@ -573,6 +595,63 @@ pub fn credDelete(target: [*:0]const u8) void {
     if (windows) _ = c.CredDeleteA(target, c.CRED_TYPE_GENERIC, 0);
 }
 
+// --- Chaveiro do macOS (o `security` do sistema) -----------------------------------
+//
+// Pelo /usr/bin/security, não pela Security.framework: a permissão de cada entrada
+// fica com ele, assinado pela Apple, e não com o executável do app, que muda a
+// cada atualização (e o sistema pediria a senha de novo depois de cada uma).
+// O segredo vai pela entrada padrão (`security -i`), nunca pela linha de comando;
+// só serviço e conta (um número) entram no comando.
+
+/// Cabe numa linha do `security -i` sem aspas: o token do Discord é base64 com pontos.
+fn keychainSafe(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '-' or ch == '_')) return false;
+    return true;
+}
+
+pub fn keychainRead(service: []const u8, account: []const u8, buf: []u8) ?[]u8 {
+    if (!macos or !keychainSafe(service) or !keychainSafe(account)) return null;
+    var cb: [200]u8 = undefined;
+    const cmd = std.fmt.bufPrintSentinel(&cb, "/usr/bin/security find-generic-password -s {s} -a {s} -w 2>/dev/null", .{ service, account }, 0) catch return null;
+    const f = c.popen(cmd.ptr, "r") orelse return null;
+    const n = c.fread(buf.ptr, 1, buf.len, f);
+    return if (c.pclose(f) == 0 and n < buf.len) buf[0..n] else null;
+}
+
+pub fn keychainWrite(service: []const u8, account: []const u8, label: []const u8, secret: []const u8) bool {
+    if (!macos or !keychainSafe(service) or !keychainSafe(account) or !keychainSafe(secret)) return false;
+    for (label) |ch| if (ch == '"' or ch == '\\' or ch < ' ') return false;
+    const f = c.popen("/usr/bin/security -i >/dev/null 2>&1", "w") orelse return false;
+    var lb: [256]u8 = undefined;
+    const head = std.fmt.bufPrint(&lb, "add-generic-password -U -s {s} -a {s} -l \"{s}\" -w ", .{ service, account, label }) catch {
+        _ = c.pclose(f);
+        return false;
+    };
+    const ok = c.fwrite(head.ptr, 1, head.len, f) == head.len and
+        c.fwrite(secret.ptr, 1, secret.len, f) == secret.len and
+        c.fwrite("\n", 1, 1, f) == 1;
+    // O `security -i` sai com o código do último comando que falhou.
+    return c.pclose(f) == 0 and ok;
+}
+
+/// Sem `account`: apaga todas as entradas do serviço.
+pub fn keychainDelete(service: []const u8, account: ?[]const u8) void {
+    if (!macos or !keychainSafe(service)) return;
+    if (account) |a| if (!keychainSafe(a)) return;
+    var cb: [200]u8 = undefined;
+    const cmd = (if (account) |a|
+        std.fmt.bufPrintSentinel(&cb, "/usr/bin/security delete-generic-password -s {s} -a {s} >/dev/null 2>&1", .{ service, a }, 0)
+    else
+        std.fmt.bufPrintSentinel(&cb, "/usr/bin/security delete-generic-password -s {s} >/dev/null 2>&1", .{service}, 0)) catch return;
+    // Cada chamada apaga uma entrada só.
+    var left: u32 = if (account == null) 64 else 1;
+    while (left > 0) : (left -= 1) {
+        const f = c.popen(cmd.ptr, "r") orelse return;
+        if (c.pclose(f) != 0) return;
+    }
+}
+
 /// No Windows confia nos certificados do sistema (não há pacote de CAs junto). No
 /// Linux, cada família de distros guarda o pacote num lugar, e o caminho embutido no
 /// OpenSSL do binário portátil só valeria na distro onde ele foi compilado.
@@ -629,9 +708,21 @@ pub fn restoreOld(to: [*:0]const u8) void {
 /// O caminho do executável que está rodando, com o nome que ele tiver. No Linux,
 /// o /proc/self/exe já resolvido (links simbólicos seguidos), como o kernel diz:
 /// trocado o arquivo com o app aberto, vem com " (deleted)" no fim (ver
-/// `core/atualizacao.liveExe`). No Windows, o GetModuleFileNameW, em UTF-8.
+/// `core/atualizacao.liveExe`). No Windows, o GetModuleFileNameW, em UTF-8. No
+/// macOS, o _NSGetExecutablePath com os links resolvidos.
 pub fn selfExe(buf: []u8) ?[]const u8 {
     if (web) return null;
+    if (macos) {
+        var raw: [1024]u8 = undefined;
+        var size: u32 = raw.len;
+        if (c._NSGetExecutablePath(&raw, &size) != 0) return null;
+        var real: [1024]u8 = undefined;
+        const r = c.realpath(&raw, &real) orelse return null;
+        const s = std.mem.span(@as([*:0]const u8, @ptrCast(r)));
+        if (s.len >= buf.len) return null;
+        @memcpy(buf[0..s.len], s);
+        return buf[0..s.len];
+    }
     if (windows) {
         var wb: [1024]u16 = undefined;
         const n: usize = c.GetModuleFileNameW(null, &wb, wb.len);
@@ -645,8 +736,15 @@ pub fn selfExe(buf: []u8) ?[]const u8 {
     return buf[0..@intCast(n)];
 }
 
-/// Memória própria do processo, em KB.
+/// Memória própria do processo, em KB (no macOS, o phys_footprint, o número do
+/// Monitor de Atividade).
 pub fn privateKb() u32 {
+    if (macos) {
+        var info: c.task_vm_info_data_t = undefined;
+        var count: c.mach_msg_type_number_t = @sizeOf(c.task_vm_info_data_t) / @sizeOf(c.natural_t);
+        if (c.task_info(c.mach_task_self_, c.TASK_VM_INFO, @ptrCast(&info), &count) != c.KERN_SUCCESS) return 0;
+        return @intCast(@min(info.phys_footprint / 1024, std.math.maxInt(u32)));
+    }
     if (!windows) return 0;
     var pm = std.mem.zeroes(c.PROCESS_MEMORY_COUNTERS_EX);
     pm.cb = @sizeOf(c.PROCESS_MEMORY_COUNTERS_EX);

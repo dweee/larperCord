@@ -4,6 +4,7 @@
   zig_0_17,
   pkg-config,
   makeWrapper,
+  makeBinaryWrapper,
   sdl3,
   freetype,
   fontconfig,
@@ -18,6 +19,10 @@
   libnotify,
   xdg-utils,
   ffmpeg-headless,
+  makeFontsConf,
+  librsvg,
+  python3,
+  writeText,
   withFfmpeg ? true,
   # Builds the headless QA robot (`--qa`) into the binary.
   withQa ? false,
@@ -27,10 +32,52 @@
 }:
 
 let
+  inherit (stdenv.hostPlatform) isDarwin isLinux;
+
   # The Discord gateway and voice connections use curl_ws_*: libcurl must be
   # built with WebSocket support, which nixpkgs leaves off by default.
   curlWs = curl.override { websocketSupport = true; };
   thirdPartyLicenses = import ./third-party-licenses.nix { inherit fetchurl; };
+
+  # macOS has no /etc/fonts, so Nix's fontconfig finds no configuration there.
+  # This one reads the system, local and per-user font folders; nix-darwin
+  # (`fonts.packages`) and Home Manager install fonts under the latter two.
+  darwinFontsConf = makeFontsConf {
+    fontDirectories = [
+      "/System/Library/Fonts"
+      "/Library/Fonts"
+      "~/Library/Fonts"
+    ];
+  };
+
+  app = "$out/Applications/larperCord.app";
+
+  # The bundle's Info.plist. Home Manager writes its own copy (with a token
+  # path) from the same attributes, hence passthru.darwinInfoPlist.
+  darwinInfoPlist = {
+    CFBundleDevelopmentRegion = "en";
+    CFBundleDisplayName = "larperCord";
+    CFBundleExecutable = "larpercord";
+    CFBundleIconFile = "larperCord";
+    CFBundleIdentifier = "dev.larpercord";
+    CFBundleInfoDictionaryVersion = "6.0";
+    CFBundleName = "larperCord";
+    CFBundlePackageType = "APPL";
+    CFBundleShortVersionString = version;
+    CFBundleVersion = version;
+    LSApplicationCategoryType = "public.app-category.social-networking";
+    LSMinimumSystemVersion = stdenv.hostPlatform.darwinMinVersion;
+    NSHighResolutionCapable = true;
+    NSSupportsAutomaticGraphicsSwitching = true;
+    # Voice calls: without this macOS refuses the microphone outright.
+    NSMicrophoneUsageDescription = "larperCord uses the microphone in voice calls.";
+    # Launches through LaunchServices (Finder, Dock, `open`, login items) get
+    # the environment from here: no exec wrapper in the bundle, so the
+    # process that runs (and asks for the microphone) is the bundle's own
+    # signed executable. bin/larpercord sets the same for the command line.
+    LSEnvironment.FONTCONFIG_FILE = "${darwinFontsConf}";
+  };
+  infoPlist = writeText "Info.plist" (lib.generators.toPlist { escape = true; } darwinInfoPlist);
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "larpercord";
@@ -41,7 +88,12 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     zig_0_17.hook
     pkg-config
-    makeWrapper
+  ]
+  ++ lib.optional isLinux makeWrapper
+  ++ lib.optionals isDarwin [
+    makeBinaryWrapper
+    librsvg
+    (python3.withPackages (ps: [ ps.pillow ]))
   ];
 
   buildInputs = [
@@ -69,49 +121,91 @@ stdenv.mkDerivation (finalAttrs: {
   # protobuf, APNG); it needs neither a display nor the network.
   doCheck = true;
 
-  postInstall = ''
-    install -Dm644 packaging/aur/dev.larpercord.desktop \
-      $out/share/applications/dev.larpercord.desktop
-    for s in 32 64 128; do
-      install -Dm644 assets/icon-$s.png \
-        $out/share/icons/hicolor/''${s}x''${s}/apps/larpercord.png
-      install -Dm644 assets/icon-$s.png \
-        $out/share/icons/hicolor/''${s}x''${s}/apps/dev.larpercord.png
-    done
-    install -Dm644 assets/logo-mark.svg \
-      $out/share/icons/hicolor/scalable/apps/larpercord.svg
-    source ${./install-notices.sh}
-    export nlohmannJsonLicense=${thirdPartyLicenses.nlohmann-json}
-    export mparkVariantLicense=${thirdPartyLicenses.mpark-variant}
-    installNotices $out/share/licenses/larpercord
-  '';
+  postInstall =
+    lib.optionalString isLinux ''
+      install -Dm644 packaging/aur/dev.larpercord.desktop \
+        $out/share/applications/dev.larpercord.desktop
+      for s in 32 64 128; do
+        install -Dm644 assets/icon-$s.png \
+          $out/share/icons/hicolor/''${s}x''${s}/apps/larpercord.png
+        install -Dm644 assets/icon-$s.png \
+          $out/share/icons/hicolor/''${s}x''${s}/apps/dev.larpercord.png
+      done
+      install -Dm644 assets/logo-mark.svg \
+        $out/share/icons/hicolor/scalable/apps/larpercord.svg
+    ''
+    # A real bundle, so Finder, the Dock, Spotlight, Launchpad and launchd see
+    # an app (and macOS can ask for the microphone). bin/larpercord points
+    # into it. The icon is the default (Terminal) mascot.
+    + lib.optionalString isDarwin ''
+      mkdir -p ${app}/Contents/MacOS ${app}/Contents/Resources
+      mv $out/bin/larpercord ${app}/Contents/MacOS/larpercord
+      install -m644 ${infoPlist} ${app}/Contents/Info.plist
+      printf 'APPL????' > ${app}/Contents/PkgInfo
+      rsvg-convert -w 1024 -h 1024 assets/icon-terminal.svg -o icon-1024.png
+      python3 -c 'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])' \
+        icon-1024.png ${app}/Contents/Resources/larperCord.icns
+    ''
+    + ''
+      source ${./install-notices.sh}
+      export nlohmannJsonLicense=${thirdPartyLicenses.nlohmann-json}
+      export mparkVariantLicense=${thirdPartyLicenses.mpark-variant}
+      installNotices $out/share/licenses/larpercord
+    '';
 
-  # Runtime-only helpers: the keyring (secret-tool), notifications
+  # Linux: runtime-only helpers: the keyring (secret-tool), notifications
   # (notify-send), links (xdg-open) and libraries opened with SDL_LoadObject
   # (D-Bus for the tray, Wayland activation, FFmpeg for video).
-  postFixup = ''
-    wrapProgram $out/bin/larpercord \
-      --suffix PATH : ${
-        lib.makeBinPath [
-          libsecret
-          libnotify
-          xdg-utils
-        ]
-      } \
-      --suffix LD_LIBRARY_PATH : ${
-        lib.makeLibraryPath (
-          [
-            dbus
-            wayland
+  # macOS: the Keychain (`security`), notifications (`osascript`) and links
+  # (NSWorkspace) are the system's own. FFmpeg goes in the bundle's
+  # Contents/Frameworks, where the client looks for it, and fontconfig gets a
+  # configuration that knows the macOS font folders.
+  postFixup =
+    lib.optionalString isLinux ''
+      wrapProgram $out/bin/larpercord \
+        --suffix PATH : ${
+          lib.makeBinPath [
+            libsecret
+            libnotify
+            xdg-utils
           ]
-          ++ lib.optional withFfmpeg ffmpeg-headless
-        )
-      }
-  '';
+        } \
+        --suffix LD_LIBRARY_PATH : ${
+          lib.makeLibraryPath (
+            [
+              dbus
+              wayland
+            ]
+            ++ lib.optional withFfmpeg ffmpeg-headless
+          )
+        }
+    ''
+    + lib.optionalString isDarwin (
+      ''
+        makeWrapper ${app}/Contents/MacOS/larpercord $out/bin/larpercord \
+          --set-default FONTCONFIG_FILE ${darwinFontsConf}
+      ''
+      + lib.optionalString withFfmpeg ''
+        mkdir -p ${app}/Contents/Frameworks
+        # The four the client loads (by their libX.N.dylib names) and
+        # libswresample, which libavcodec needs. Their own dependencies stay
+        # in the store, referenced by absolute install names.
+        for name in avutil swscale swresample avcodec avformat; do
+          for lib in ${lib.getLib ffmpeg-headless}/lib/lib$name.*.dylib; do
+            if [[ $(basename "$lib") =~ ^lib$name\.[0-9]+\.dylib$ ]]; then
+              ln -s "$lib" ${app}/Contents/Frameworks/
+            fi
+          done
+        done
+        test "$(ls ${app}/Contents/Frameworks | wc -l)" -eq 5
+      ''
+    );
 
   passthru = {
     inherit withFfmpeg;
     curl = curlWs;
+    fontsConf = if isDarwin then darwinFontsConf else null;
+    darwinInfoPlist = if isDarwin then darwinInfoPlist else null;
   };
 
   meta = {
@@ -119,7 +213,8 @@ stdenv.mkDerivation (finalAttrs: {
     homepage = "https://github.com/RshaCuDeVidro/larperCord";
     license = lib.licenses.gpl3Only;
     mainProgram = "larpercord";
-    platforms = lib.platforms.linux;
+    # Nixpkgs 26.11 dropped x86_64-darwin.
+    platforms = lib.platforms.linux ++ [ "aarch64-darwin" ];
     sourceProvenance = [ lib.sourceTypes.fromSource ];
   };
 })

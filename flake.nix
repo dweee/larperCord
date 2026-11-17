@@ -8,6 +8,11 @@
       url = "github:nix-community/home-manager/9d7ba6bef3904a018d38b92f83132eaf01eb8ef3";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Only used by the nix-darwin module check.
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin/ff0e21a414d4547183396da1b44a66f2577b65e9";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -15,6 +20,7 @@
       self,
       nixpkgs,
       home-manager,
+      nix-darwin,
     }:
     let
       inherit (nixpkgs) lib;
@@ -22,7 +28,6 @@
       # release workflow builds exactly this set.
       inventory = lib.importJSON ./nix/platforms.json;
       packageSystems = builtins.attrNames inventory;
-      linuxSystems = builtins.filter (lib.hasSuffix "-linux") packageSystems;
       # Nixpkgs 26.11 dropped x86_64-darwin.
       allSystems = lib.unique (packageSystems ++ [ "aarch64-darwin" ]);
       forSystems = systems: f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -52,17 +57,27 @@
       homeModules.default = import ./nix/hm-module.nix self;
       homeModules.larpercord = self.homeModules.default;
       homeManagerModules = self.homeModules;
+      darwinModules.default = import ./nix/darwin-module.nix self;
+      darwinModules.larpercord = self.darwinModules.default;
 
-      checks = forSystems linuxSystems (
-        pkgs: import ./nix/checks.nix { inherit self pkgs home-manager; }
+      checks = forSystems packageSystems (
+        pkgs:
+        import ./nix/checks.nix {
+          inherit
+            self
+            pkgs
+            home-manager
+            nix-darwin
+            ;
+        }
       );
 
-      # Need KVM; run by .github/workflows/vm-and-windows.yml.
+      # Need KVM; run by .github/workflows/runtime.yml.
       tests = forSystems [ "x86_64-linux" ] (pkgs: import ./nix/tests.nix { inherit self pkgs; });
 
       devShells = forSystems allSystems (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = lib.optional pkgs.stdenv.hostPlatform.isLinux (pkgs.callPackage ./nix/package.nix { });
+          inputsFrom = [ (pkgs.callPackage ./nix/package.nix { }) ];
           packages = [
             pkgs.zig_0_17
             pkgs.pkg-config

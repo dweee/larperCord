@@ -4824,7 +4824,7 @@ pub const Gateway = struct {
 };
 
 /// Procura o token, nesta ordem:
-///   1. variável LARPER_TOKEN
+///   1. variável LARPER_TOKEN (ou o arquivo em LARPER_TOKEN_FILE)
 ///   2. chaveiro do sistema: `secret-tool lookup service larpercord`
 ///   3. ~/.config/larpercord/token (precisa ter permissão 600)
 /// Retorna null se não houver (o app usa o modo demonstração).
@@ -4852,8 +4852,31 @@ pub fn takeEnvToken() void {
         const s = std.mem.trim(u8, std.mem.span(t), " \n\r\t");
         if (s.len > 20) env_token = alloc.dupeSentinel(u8, s, 0) catch null;
     }
-    _ = c.SDL_UnsetEnvironmentVariable(c.SDL_GetEnvironment(), "LARPER_TOKEN");
-    if (sys.windows) _ = c.SetEnvironmentVariableA("LARPER_TOKEN", null) else _ = c.unsetenv("LARPER_TOKEN");
+    // LARPER_TOKEN_FILE: o caminho de um arquivo só do dono com o token (um segredo do
+    // agenix, por exemplo). Serve para quem abre o app sem shell no meio: o Info.plist
+    // de um .app (LSEnvironment) ou um agente do launchd levam o caminho, nunca o token.
+    // / A path to an owner-only file holding the token, for launches with no shell
+    // in between (an app bundle's LSEnvironment, a launchd agent).
+    if (env_token == null) if (c.SDL_getenv("LARPER_TOKEN_FILE")) |p| tokenFromFile(p);
+    for ([_][*:0]const u8{ "LARPER_TOKEN", "LARPER_TOKEN_FILE" }) |name| {
+        _ = c.SDL_UnsetEnvironmentVariable(c.SDL_GetEnvironment(), name);
+        if (sys.windows) _ = c.SetEnvironmentVariableA(name, null) else _ = c.unsetenv(name);
+    }
+}
+
+fn tokenFromFile(path: [*:0]const u8) void {
+    if (!sys.ownerOnly(path)) {
+        std.log.warn("LARPER_TOKEN_FILE: {s} não existe ou é legível por outros usuários", .{path});
+        return;
+    }
+    var size: usize = 0;
+    const data = c.SDL_LoadFile(path, &size) orelse return;
+    defer {
+        std.crypto.secureZero(u8, @as([*]u8, @ptrCast(data))[0..size]);
+        c.SDL_free(data);
+    }
+    const s = std.mem.trim(u8, @as([*]const u8, @ptrCast(data))[0..size], " \n\r\t");
+    if (s.len > 20) env_token = alloc.dupeSentinel(u8, s, 0) catch null;
 }
 
 var env_token_read = false;
@@ -4861,7 +4884,7 @@ var env_token: ?[:0]u8 = null;
 
 /// Só o token guardado na entrada antiga (chaveiro, depois o arquivo).
 pub fn loadSavedToken() ?[:0]u8 {
-    if (sys.windows) return null; // A entrada antiga só existe no Linux.
+    if (sys.windows or sys.macos) return null; // A entrada antiga só existe no Linux.
     if (c.popen("secret-tool lookup service larpercord 2>/dev/null", "r")) |f| {
         var buf: [256]u8 = undefined;
         const n = c.fread(&buf, 1, buf.len, f);
@@ -4895,7 +4918,7 @@ fn tokenFilePath(buf: []u8) ?[:0]const u8 {
 
 /// "Sair": apaga o token do chaveiro e do arquivo.
 pub fn forgetToken() void {
-    if (sys.windows) return;
+    if (sys.windows or sys.macos) return;
     if (c.popen("secret-tool clear service larpercord 2>/dev/null", "r")) |f| _ = c.pclose(f);
     var pbuf: [512]u8 = undefined;
     if (tokenFilePath(&pbuf)) |p| _ = c.unlink(p.ptr);

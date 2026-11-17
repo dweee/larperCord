@@ -59,7 +59,10 @@ pub const Window = struct {
         var flags = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | (if (sys.web) 0 else c.SDL_WINDOW_TRANSPARENT);
         // LARPER_HIDDEN=1: janela escondida (medir desempenho com a GPU de verdade).
         if (c.SDL_getenv("LARPER_HIDDEN") != null) flags |= c.SDL_WINDOW_HIDDEN;
-        const window = c.SDL_CreateWindow(title, w, h, flags) orelse return error.SdlWindow;
+        const window = createWindow(title, w, h, flags) orelse {
+            std.log.err("SDL window: {s}", .{c.SDL_GetError()});
+            return error.SdlWindow;
+        };
         errdefer c.SDL_DestroyWindow(window);
         // On Windows the requested size is in pixels: at 150% the window would open at 2/3 size.
         const s = contentScale(window);
@@ -246,10 +249,27 @@ fn preferNvidiaEgl() void {
 
 /// Memória proporcional (PSS) do próprio processo, em KB. `file` é a parte que vem
 /// de arquivos e dispositivos (bibliotecas, fontes, driver), 0 onde não se sabe.
+/// No macOS o SDL liga o OpenGL em toda janela nova, e o driver `offscreen` (os
+/// prints, sem tela) só tem OpenGL pelo EGL, que o macOS não tem. Lá a janela diz
+/// que o contexto é de fora: o renderizador por software desenha nela do mesmo jeito.
+fn createWindow(title: [*:0]const u8, w: c_int, h: c_int, flags: c.SDL_WindowFlags) ?*c.SDL_Window {
+    const driver = c.SDL_GetCurrentVideoDriver();
+    if (!sys.macos or driver == null or !std.mem.eql(u8, std.mem.span(driver.?), "offscreen")) return c.SDL_CreateWindow(title, w, h, flags);
+    const props = c.SDL_CreateProperties();
+    if (props == 0) return null;
+    defer c.SDL_DestroyProperties(props);
+    _ = c.SDL_SetStringProperty(props, c.SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
+    _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, w);
+    _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
+    _ = c.SDL_SetNumberProperty(props, c.SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, @intCast(flags));
+    _ = c.SDL_SetBooleanProperty(props, c.SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, true);
+    return c.SDL_CreateWindowWithProperties(props);
+}
+
 pub const SelfMem = struct { pss: u32 = 0, file: u32 = 0 };
 
 pub fn selfMemKb() SelfMem {
-    if (sys.windows) return .{ .pss = sys.privateKb() };
+    if (sys.windows or sys.macos) return .{ .pss = sys.privateKb() };
     // Navegador: não há /proc; o que a aba guarda para o app é a memória do wasm.
     if (builtin.os.tag == .emscripten) return .{ .pss = @intCast(c.emscripten_get_heap_size() / 1024) };
     // Arquivos do /proc não informam o tamanho, então lê direto.
