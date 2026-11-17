@@ -4884,7 +4884,7 @@ pub const Gateway = struct {
 };
 
 /// Procura o token, nesta ordem:
-///   1. variável LARPER_TOKEN
+///   1. variável LARPER_TOKEN (ou o arquivo em LARPER_TOKEN_FILE)
 ///   2. chaveiro do sistema: `secret-tool lookup service larpercord`
 ///   3. ~/.config/larpercord/token (precisa ter permissão 600)
 /// Retorna null se não houver (o app usa o modo demonstração).
@@ -4912,8 +4912,31 @@ pub fn takeEnvToken() void {
         const s = std.mem.trim(u8, std.mem.span(t), " \n\r\t");
         if (s.len > 20) env_token = alloc.dupeSentinel(u8, s, 0) catch null;
     }
-    _ = c.SDL_UnsetEnvironmentVariable(c.SDL_GetEnvironment(), "LARPER_TOKEN");
-    if (sys.windows) _ = c.SetEnvironmentVariableA("LARPER_TOKEN", null) else _ = c.unsetenv("LARPER_TOKEN");
+    // LARPER_TOKEN_FILE: o caminho de um arquivo só do dono com o token (um segredo do
+    // agenix, por exemplo). Serve para quem abre o app sem shell no meio: o Info.plist
+    // de um .app (LSEnvironment) ou um agente do launchd levam o caminho, nunca o token.
+    // / A path to an owner-only file holding the token, for launches with no shell
+    // in between (an app bundle's LSEnvironment, a launchd agent).
+    if (env_token == null) if (c.SDL_getenv("LARPER_TOKEN_FILE")) |p| tokenFromFile(p);
+    for ([_][*:0]const u8{ "LARPER_TOKEN", "LARPER_TOKEN_FILE" }) |name| {
+        _ = c.SDL_UnsetEnvironmentVariable(c.SDL_GetEnvironment(), name);
+        if (sys.windows) _ = c.SetEnvironmentVariableA(name, null) else _ = c.unsetenv(name);
+    }
+}
+
+fn tokenFromFile(path: [*:0]const u8) void {
+    if (!sys.ownerOnly(path)) {
+        std.log.warn("LARPER_TOKEN_FILE: {s} não existe ou é legível por outros usuários", .{path});
+        return;
+    }
+    var size: usize = 0;
+    const data = c.SDL_LoadFile(path, &size) orelse return;
+    defer {
+        std.crypto.secureZero(u8, @as([*]u8, @ptrCast(data))[0..size]);
+        c.SDL_free(data);
+    }
+    const s = std.mem.trim(u8, @as([*]const u8, @ptrCast(data))[0..size], " \n\r\t");
+    if (s.len > 20) env_token = alloc.dupeSentinel(u8, s, 0) catch null;
 }
 
 var env_token_read = false;
