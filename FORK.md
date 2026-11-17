@@ -19,8 +19,8 @@ an old base) that is useful reference for Darwin work.
 | `packages.{x86_64,aarch64}-linux.larpercord` | Native Linux client, built from source with nixpkgs Zig 0.17, SDL3, curl (with WebSocket), OpenSSL |
 | `packages.x86_64-linux.larpercord-windows` | Windows x86_64 build cross-compiled by Zig (`bin/larpercord.exe`, its three DLLs, and a portable zip) |
 | `overlays.default` | Adds `pkgs.larpercord` |
-| `nixosModules.default` | `programs.larpercord`: the package, emoji/CJK fonts, and an opt-in GNOME Keyring (`keyring.enable`) for desktops without a Secret Service provider |
-| `homeModules.default` | `programs.larpercord`: package, declarative themes and Lua plugins, `tokenFile`, autostart |
+| `nixosModules.default` | `programs.larpercord`: the package, emoji/CJK fonts, and an opt-in GNOME Keyring (`keyring.enable`) for desktops without a Secret Service provider. It warns when combined with Plasma 6: KWallet is already the Secret Service there |
+| `homeModules.default` | `programs.larpercord`: package, declarative themes and Lua plugins, `tokenFile`, autostart, `useNixGL` (non-NixOS GPU, see [below](#gpu-on-a-non-nixos-distribution)) |
 | `checks.<linux>.*` | Package build (runs `zig build test`), an offscreen frame of the demo, both module evaluations |
 | `tests.x86_64-linux.nixos-vm` | NixOS VM test: the module on a booted system, a frame drawn as a normal user (needs KVM) |
 
@@ -92,6 +92,59 @@ Home Manager:
 - The source passed to Zig excludes `nix/`, `ci/`, `.github/`, `site/` and the
   flake files, so packaging edits do not rebuild the client.
 
+## GPU on a non-NixOS distribution
+
+A Nix-built larperCord does not use the host's graphics driver by itself, and
+on a Wayland session it does not fall back to a software renderer either: it
+fails to start. What we read and measured:
+
+- nixpkgs `libglvnd` (`pkgs/by-name/li/libglvnd/package.nix`) looks for EGL
+  vendor files in `/run/opengl-driver/share/glvnd/egl_vendor.d`, then
+  `/etc/glvnd/egl_vendor.d` and `/usr/share/glvnd/egl_vendor.d`. The host
+  Mesa's file in the last directory names a bare `libEGL_mesa.so.0`, which Nix's
+  glibc does not search the host library directories for, and host drivers
+  built against the host glibc would not load into a Nix-built process anyway.
+  Only `/run/opengl-driver` (a Nix-built Mesa or NVIDIA) works.
+- The wrapper does not add a driver path: it only suffixes `PATH` and
+  `LD_LIBRARY_PATH` with D-Bus, Wayland, FFmpeg and the helpers.
+- nixpkgs SDL3 3.4.18 has no window framebuffer on Wayland (no
+  `CreateWindowFramebuffer` in `src/video/wayland`); its software renderer
+  needs a working GL/GPU renderer for the texture path. So `LARPER_RENDERER=software`
+  does not help either.
+- Measured on lapwolf (NixOS) with an empty directory mounted over
+  `/run/opengl-driver`'s target (`bwrap --dev-bind / / --tmpfs …`, which
+  emulates a host with no Nix-visible driver): SDL logs
+  `Couldn't create renderer opengl: Could not get EGL display`, `opengles2`
+  the same, `vulkan: Installed Vulkan doesn't implement the VK_KHR_surface
+  extension`, `gpu: No supported SDL_GPU backend found!`, `software: Window
+  framebuffer support not available`, and the app exits with `error:
+  SdlRenderer`. We did not test an X11 session without drivers, and did not
+  have a real non-NixOS host to test the fixes below on.
+
+Fixes, both from Home Manager (pinned here; `targets.genericLinux.gpu` and
+`targets.genericLinux.nixGL` both exist in it):
+
+```nix
+{
+  targets.genericLinux.enable = true;
+  # Either: link Nix's Mesa at /run/opengl-driver once (run the printed
+  # `sudo …/non-nixos-gpu-setup`); then no wrapper is needed.
+  targets.genericLinux.gpu.enable = true;
+  # NVIDIA needs the exact host driver version and hash:
+  #   targets.genericLinux.gpu.nvidia = { enable = true; version = "…"; sha256 = "…"; };
+
+  # Or: run larperCord through nixGL.
+  # targets.genericLinux.nixGL.packages = inputs.nixGL.packages;
+  # programs.larpercord.useNixGL = true;
+}
+```
+
+`useNixGL` passes the final package (including the `tokenFile` wrapper) through
+`config.lib.nixGL.wrap`. The `home-manager-nixgl` check builds that chain with a
+stub in place of nixGL and runs `larpercord --version` through it, and checks
+that `useNixGL` without `nixGL.packages` warns. It does not prove a GPU is used.
+Leave it off on NixOS.
+
 ## CI
 
 - `release-channels.yml`, `pr-checks.yml`, `scheduled-updates.yml`,
@@ -115,4 +168,23 @@ Home Manager:
 | Linux x86_64 | Builds, tests, renders offscreen, NixOS VM test passes |
 | Linux aarch64 | Builds and is checked natively in CI |
 | Windows x86_64 | Cross-compiled; runtime smoke test on `windows-latest` |
+| Linux, KDE Plasma 6 on Wayland | Verified live on lapwolf (KWin 6.8.2, 2026-11-17); see below |
 | macOS (nix-darwin) | Not supported upstream; port in progress on a separate branch |
+
+### KDE Plasma 6 Wayland: what was run
+
+`nix build .#larpercord`, then `larpercord --demo` with a throwaway
+`XDG_CONFIG_HOME` (no account, no token) on a real Plasma session. Evidence
+(screenshots, D-Bus captures) was kept outside the repository.
+
+| Item | Result |
+|---|---|
+| Native Wayland, GPU renderer | `SDL video: wayland, renderer: opengl`. The process held `/dev/dri/renderD129` with `drm-driver: amdgpu` and a growing `drm-engine-gfx`, and mapped Mesa's `libgallium`: hardware GL, not llvmpipe. The GL renderer string itself is not logged by the app |
+| Server-side decorations | KWin drew the Breeze title bar (`noBorder: false`; `spectacle -b -n -a` of the window shows it) |
+| `app_id` | KWin reports `resourceClass`/`desktopFile` `dev.larpercord`, equal to the desktop file's name and `StartupWMClass`. The package was not installed into the session, so Plasma's own taskbar lookup of the installed desktop file was not exercised; the window also supplies its own icon |
+| Tray | The `--tray-helper` process registered `org.kde.StatusNotifierItem-<pid>-1` with the `StatusNotifierWatcher` (Active, `Communications`, menu `/MenuBar`). A click or the menu was not driven |
+| Notifications | A demo plugin's `larper.notify(..., {desktop = true})` made `notify-send --app-name=larperCord` call `org.freedesktop.Notifications.Notify` on plasmashell. Ordinary message notifications are off in demo mode, so that path was not run |
+| Dark/light | With theme mode "system" the window followed `org.freedesktop.appearance color-scheme`: dark under Plasma's real portal, and light, dark, light again on a private bus carrying a mock portal (live `SettingChanged`, so Plasma's own colors were never touched) |
+| File picker | `OpenFile` went to `org.freedesktop.portal.Desktop` and on to the KDE backend; the dialog was the KDE "Open File" window, transient to the app, with no `zenity` process. The click was replaced by a throwaway build that fires the same `pickFiles` action; the dialog was closed by ending the app |
+| Secret Service | `accounts_store.storeToken`/`tokenFor`/`forgetToken` from a throwaway build: store, lookup (value matched) and delete reached KWallet as `CreateItem`, `SearchItems` and `Delete`; nothing was left behind. The login screen itself was not driven |
+
