@@ -13,6 +13,7 @@
     "nix/windows.nix",
     "nix/nixos-module.nix",
     "nix/hm-module.nix",
+    "nix/darwin-module.nix",
     "nix/checks.nix"
   ],
   "protected_paths": [
@@ -33,6 +34,12 @@
       "system": "aarch64-linux",
       "packages": ["larpercord"],
       "checks": ["screenshot", "home-manager-module", "nixos-module"],
+      "tests": []
+    },
+    {
+      "system": "aarch64-darwin",
+      "packages": ["larpercord", "larpercord-windows"],
+      "checks": ["screenshot", "home-manager-module", "darwin-module"],
       "tests": []
     }
   ]
