@@ -48,7 +48,7 @@ fn sleepForever() noreturn {
 }
 
 fn ignoreTerm() void {
-    _ = c.signal(c.SIGTERM, c.SIG_IGN);
+    @import("platform/sys.zig").ignoreSignal(.TERM);
 }
 
 pub fn run(name: []const u8) noreturn {

@@ -81,8 +81,21 @@ pub fn init() void {
         _ = c.WSAStartup(0x0202, &data);
     } else {
         // Um filho (secret-tool) ou pipe fechado vira erro de write, não a morte do app.
-        _ = c.signal(c.SIGPIPE, c.SIG_IGN);
+        ignoreSignal(.PIPE);
     }
+}
+
+/// Ignora um sinal (POSIX). Pelo std e não por `c.signal(..., c.SIG_IGN)`: a macro
+/// converte o inteiro 1 num ponteiro de função, e o translate-c recusa esse endereço
+/// em alvos que alinham funções (aarch64). / Ignores a signal through std rather
+/// than the C SIG_IGN macro, which translate-c rejects on aarch64.
+pub fn ignoreSignal(sig: std.posix.SIG) void {
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(sig, &act, null);
 }
 
 pub fn poll(fds: [*]PollFd, n: usize, timeout_ms: c_int) void {
