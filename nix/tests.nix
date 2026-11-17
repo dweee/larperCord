@@ -8,7 +8,10 @@
     name = "larpercord-nixos-vm";
     nodes.machine = {
       imports = [ self.nixosModules.default ];
-      programs.larpercord.enable = true;
+      programs.larpercord = {
+        enable = true;
+        keyring.enable = true;
+      };
       users.users.alice = {
         isNormalUser = true;
         uid = 1000;

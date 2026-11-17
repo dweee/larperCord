@@ -15,7 +15,10 @@ let
     modules = [
       self.nixosModules.default
       {
-        programs.larpercord.enable = true;
+        programs.larpercord = {
+          enable = true;
+          keyring.enable = true;
+        };
         boot.loader.grub.enable = false;
         fileSystems."/" = {
           device = "none";
@@ -38,6 +41,22 @@ let
     LARPER_RENDERER = "software";
     LARPER_DEMO_EPOCH_MS = "1790000000000";
     TZ = "UTC";
+  };
+
+  nixosDefault = import "${pkgs.path}/nixos/lib/eval-config.nix" {
+    inherit system;
+    modules = [
+      self.nixosModules.default
+      {
+        programs.larpercord.enable = true;
+        boot.loader.grub.enable = false;
+        fileSystems."/" = {
+          device = "none";
+          fsType = "tmpfs";
+        };
+        system.stateVersion = "25.11";
+      }
+    ];
   };
 
   hmConfig = home-manager.lib.homeManagerConfiguration {
@@ -74,9 +93,27 @@ in
     d=${pkg}/share/licenses/larpercord
     for f in LICENSE third_party/rnnoise/COPYING third_party/imgui/LICENSE.txt \
       third_party/lua/LICENSE third_party/fribidi/COPYING third_party/libdave/LICENSE \
-      third_party/mlspp/LICENSE third_party/nlohmann/NOTICE third_party/stb/LICENSE; do
+      third_party/mlspp/LICENSE third_party/nlohmann/NOTICE third_party/stb/LICENSE \
+      third_party/nlohmann/LICENSE.MIT third_party/mlspp-variant/LICENSE.md; do
       test -s $d/$f
     done
+    # Full permission texts, not only names or SPDX identifiers.
+    grep -q 'Permission is hereby granted' $d/third_party/nlohmann/LICENSE.MIT
+    grep -q 'Boost Software License' $d/third_party/mlspp-variant/LICENSE.md
+    grep -q 'Permission is hereby granted' $d/third_party/mlspp-variant/LICENSE.md
+    grep -q 'THE SOFTWARE IS PROVIDED' $d/third_party/imgui/LICENSE.txt
+    grep -q 'Redistribution and use in source and binary forms' $d/third_party/rnnoise/COPYING
+    touch $out
+  '';
+
+  # The libcurl the binary loads speaks WebSocket (the gateway and voice need
+  # wss). Upstream's --tls-check prints the protocol list result before it
+  # tries the network, which the sandbox does not have.
+  websocket = pkgs.runCommand "larpercord-websocket" { } ''
+    export HOME=$TMPDIR
+    ${lib.getExe pkg} --tls-check https://discord.invalid > log 2>&1 || true
+    cat log
+    grep -q 'WebSocket: true' log
     touch $out
   '';
 
@@ -137,6 +174,8 @@ in
     assert lib.elem "larpercord" names;
     assert lib.elem "noto-fonts-color-emoji" fonts;
     assert cfg.services.gnome.gnome-keyring.enable;
+    # Off by default: another Secret Service provider may already run.
+    assert !nixosDefault.config.services.gnome.gnome-keyring.enable;
     pkgs.writeText "larpercord-nixos-module" (builtins.toJSON { inherit names fonts; });
 }
 // lib.optionalAttrs (system == "x86_64-linux") {

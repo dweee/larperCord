@@ -43,6 +43,7 @@ let
     "libcurl-x64.dll"
     "libcrypto-3-x64.dll"
   ];
+  thirdPartyLicenses = import ./third-party-licenses.nix { inherit fetchurl; };
 in
 stdenvNoCC.mkDerivation {
   pname = "larpercord-windows";
@@ -113,6 +114,8 @@ stdenvNoCC.mkDerivation {
 
   postInstall = ''
     source ${./install-notices.sh}
+    export nlohmannJsonLicense=${thirdPartyLicenses.nlohmann-json}
+    export mparkVariantLicense=${thirdPartyLicenses.mpark-variant}
     installNotices $out/share/licenses/larpercord
     cp -r .deps/windows/licenses $out/share/licenses/larpercord/windows
 

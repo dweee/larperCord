@@ -11,7 +11,6 @@ let
     mkEnableOption
     mkIf
     mkOption
-    mkDefault
     types
     ;
 in
@@ -28,12 +27,14 @@ in
 
     keyring.enable = mkOption {
       type = types.bool;
-      default = true;
+      default = false;
+      example = true;
       description = ''
-        Run a Secret Service provider (GNOME Keyring) so that "Remember"
-        stores tokens in the keyring instead of a `chmod 600` file under
-        `~/.config/larpercord/tokens`. Has no effect when another provider,
-        such as KWallet, is already configured.
+        Enable GNOME Keyring as the Secret Service provider, so "Remember"
+        stores tokens in the keyring through `secret-tool`. Leave it off when
+        the desktop already provides one (GNOME, KDE Plasma's KWallet,
+        KeePassXC, pass-secret-service). Without any provider the app keeps
+        tokens in `~/.config/larpercord/tokens/<ID>` with mode 600.
       '';
     };
 
@@ -50,9 +51,7 @@ in
   config = mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    services.gnome.gnome-keyring.enable = mkIf (
-      cfg.keyring.enable && !(config.services.desktopManager.plasma6.enable or false)
-    ) (mkDefault true);
+    services.gnome.gnome-keyring.enable = mkIf cfg.keyring.enable true;
 
     fonts.packages = mkIf cfg.fonts.enable [
       pkgs.noto-fonts-color-emoji

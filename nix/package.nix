@@ -23,8 +23,15 @@
   withQa ? false,
   larpercordSource ? import ./source.nix { inherit lib; },
   version ? import ./version.nix,
+  fetchurl,
 }:
 
+let
+  # The Discord gateway and voice connections use curl_ws_*: libcurl must be
+  # built with WebSocket support, which nixpkgs leaves off by default.
+  curlWs = curl.override { websocketSupport = true; };
+  thirdPartyLicenses = import ./third-party-licenses.nix { inherit fetchurl; };
+in
 stdenv.mkDerivation (finalAttrs: {
   pname = "larpercord";
   inherit version;
@@ -41,7 +48,7 @@ stdenv.mkDerivation (finalAttrs: {
     sdl3
     freetype
     fontconfig
-    curl
+    curlWs
     zlib
     libwebp
     libopus
@@ -74,6 +81,8 @@ stdenv.mkDerivation (finalAttrs: {
     install -Dm644 assets/logo-mark.svg \
       $out/share/icons/hicolor/scalable/apps/larpercord.svg
     source ${./install-notices.sh}
+    export nlohmannJsonLicense=${thirdPartyLicenses.nlohmann-json}
+    export mparkVariantLicense=${thirdPartyLicenses.mpark-variant}
     installNotices $out/share/licenses/larpercord
   '';
 
@@ -102,6 +111,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit withFfmpeg;
+    curl = curlWs;
   };
 
   meta = {
