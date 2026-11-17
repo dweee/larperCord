@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "inputs": {
+    "home-manager": {
+      "source": "github:nix-community/home-manager"
+    },
+    "nixpkgs": {
+      "source": "github:NixOS/nixpkgs/nixos-unstable"
+    }
+  }
+}

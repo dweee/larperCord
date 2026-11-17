@@ -1,0 +1,11 @@
+{
+  "branch": "9624c551988557aefce292e53c30583357c9dda6",
+  "release": {
+    "id": 444963383,
+    "sha": "9624c551988557aefce292e53c30583357c9dda6",
+    "tag": "v0.6.6"
+  },
+  "track": "release",
+  "upstream": "RshaCuDeVidro/larperCord",
+  "version": 1
+}

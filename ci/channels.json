@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "forge": "github",
+  "repository": "dweee/larperCord",
+  "branch": "flakey",
+  "remote": "https://github.com/dweee/larperCord.git",
+  "targets": {
+    "x86_64-linux": [
+      {
+        "attribute": "packages.x86_64-linux.larpercord",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.larpercord-windows",
+        "visibility": "public"
+      }
+    ],
+    "aarch64-linux": [
+      {
+        "attribute": "packages.aarch64-linux.larpercord",
+        "visibility": "public"
+      }
+    ]
+  },
+  "submodules": false,
+  "integrationInventory": false
+}

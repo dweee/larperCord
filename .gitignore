@@ -9,3 +9,5 @@ docs/try/
 docs/pt/try/
 # O emcc carrega tools/web/freetype_png.py como módulo e o Python grava o bytecode ao lado.
 tools/web/__pycache__/
+__pycache__/
+*.pyc

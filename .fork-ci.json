@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "upstream": "RshaCuDeVidro/larperCord",
+  "branch": "main",
+  "track": "release",
+  "author": {
+    "name": "dave",
+    "email": "git@d.monke.fail"
+  },
+  "required_paths": [
+    "flake.nix",
+    "nix/package.nix",
+    "nix/windows.nix",
+    "nix/nixos-module.nix",
+    "nix/hm-module.nix",
+    "nix/checks.nix"
+  ],
+  "protected_paths": [
+    "ci/**",
+    "nix/**",
+    "flake.nix",
+    "flake.lock",
+    "FORK.md"
+  ],
+  "matrix": [
+    {
+      "system": "x86_64-linux",
+      "packages": ["larpercord", "larpercord-windows"],
+      "checks": ["screenshot", "home-manager-module", "nixos-module"],
+      "tests": []
+    },
+    {
+      "system": "aarch64-linux",
+      "packages": ["larpercord"],
+      "checks": ["screenshot", "home-manager-module", "nixos-module"],
+      "tests": []
+    }
+  ]
+}

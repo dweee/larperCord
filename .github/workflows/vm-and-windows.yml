@@ -1,0 +1,95 @@
+# Tests the release gate cannot run: the NixOS VM test (needs KVM) and the
+# Nix-built Windows package on a real Windows runner. The release workflow
+# already builds every package and flake check.
+name: VM and Windows runtime
+"on":
+  push:
+    branches: [flakey]
+    paths-ignore: ["**/*.md", "docs/**", "site/**"]
+  pull_request:
+    paths-ignore: ["**/*.md", "docs/**", "site/**"]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: vm-and-windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  nixos-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: true
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: NixOS module VM test
+        run: |
+          nix build .#tests.x86_64-linux.nixos-vm --no-write-lock-file -L --out-link vm-result
+          cp vm-result/shot.png nixos-vm-shot.png
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nixos-vm-shot
+          path: nixos-vm-shot.png
+          retention-days: 7
+
+  windows-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: Cross-compile the Windows package with Zig
+        run: |
+          nix build .#larpercord-windows --no-write-lock-file -L --out-link win
+          cp win/larpercord-windows-x86_64.zip .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: larpercord-windows-x86_64
+          path: larpercord-windows-x86_64.zip
+          retention-days: 7
+
+  windows-runtime:
+    needs: windows-build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: larpercord-windows-x86_64
+      - name: Draw one frame of the demo
+        shell: pwsh
+        env:
+          SDL_VIDEO_DRIVER: windows
+          LARPER_RENDERER: software
+        run: |
+          Expand-Archive larpercord-windows-x86_64.zip -DestinationPath app
+          $env:APPDATA = Join-Path $PWD 'appdata'
+          $env:LOCALAPPDATA = Join-Path $PWD 'localappdata'
+          $shot = Join-Path $PWD 'windows-shot.png'
+          $p = Start-Process -FilePath app\larpercord.exe -ArgumentList '--theme','classico','--shot',$shot -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          Get-Content out.txt,err.txt -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "larpercord.exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 20000) { throw "no screenshot" }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-shot
+          path: windows-shot.png
+          retention-days: 7
