@@ -1,6 +1,7 @@
-# Tests the release gate cannot run: the NixOS VM test (needs KVM) and the
-# Nix-built Windows package on a real Windows runner. The release workflow
-# already builds every package and flake check.
+# Tests that do not depend on the Niks3 cache: every flake check on each native
+# Linux system, the NixOS VM test (needs KVM) and the Nix-built Windows package
+# on a real Windows runner. The release workflow builds the same packages and
+# checks again before it publishes and promotes `tested`.
 name: VM and Windows runtime
 "on":
   push:
@@ -15,6 +16,38 @@ concurrency:
   group: vm-and-windows-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  flake-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    name: flake check (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = false
+      - name: Build every package and check for this system
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$SYSTEM"
+          nix flake check --no-write-lock-file -L --system "$SYSTEM"
+          nix build --no-write-lock-file -L --no-link ".#packages.$SYSTEM.larpercord"
+
   nixos-vm:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
