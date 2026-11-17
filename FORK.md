@@ -3,8 +3,9 @@
 Upstream: https://github.com/RshaCuDeVidro/larperCord (GPL-3.0-only)
 
 Base: upstream release `v0.6.6` (`9624c551988557aefce292e53c30583357c9dda6`).
-Upstream history and authorship are kept; this fork changes no upstream
-source file. It adds Nix packaging, modules and CI only.
+Upstream history and authorship are kept. The fork adds Nix packaging,
+modules and CI, plus the small, upstreamable source fixes listed under
+[Source patches](#source-patches).
 
 When this fork was created (2026-11-17) nobody had published a Nix package or
 flake for larperCord. We checked GitHub code search, all 20 public forks, NUR
@@ -57,6 +58,12 @@ Home Manager:
 }
 ```
 
+## Source patches
+
+| Files | Why |
+|---|---|
+| `src/platform/sys.zig`, `src/qa_lsp_server.zig` | Ignore SIGPIPE/SIGTERM via `std.posix.sigaction` instead of `c.signal(..., c.SIG_IGN)`: translate-c rejects the `SIG_IGN` cast on aarch64, so upstream did not build for aarch64-linux. |
+
 ## Packaging notes
 
 - The upstream build parses its own `-Doptimize=debug|safe|fast|small` and
@@ -75,6 +82,9 @@ Home Manager:
   release builds, and FreeType source from `tools/windows_deps.sh`, as
   fixed-output fetches. Those DLLs and static libraries are upstream
   prebuilt binaries; `meta.sourceProvenance` says so.
+- Both packages install the GPL license and the notices of every vendored
+  library under `share/licenses/larpercord`; the Windows zip carries them in
+  `licenses/`, with the notices of the DLLs and static libraries it ships.
 - The source passed to Zig excludes `nix/`, `ci/`, `.github/`, `site/` and the
   flake files, so packaging edits do not rebuild the client.
 
