@@ -63,6 +63,7 @@ Home Manager:
 | Files | Why |
 |---|---|
 | `src/platform/sys.zig`, `src/qa_lsp_server.zig` | Ignore SIGPIPE/SIGTERM via `std.posix.sigaction` instead of `c.signal(..., c.SIG_IGN)`: translate-c rejects the `SIG_IGN` cast on aarch64, so upstream did not build for aarch64-linux. |
+| `src/net/discord.zig`, `src/main.zig` | Read `LARPER_TOKEN` once at startup and remove it from the libc and SDL environments, so helpers the app spawns (`notify-send`, `secret-tool`, `xdg-open`) do not inherit the token. The Home Manager `tokenFile` wrapper passes the token this way. |
 
 ## Packaging notes
 
