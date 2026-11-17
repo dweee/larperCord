@@ -51,29 +51,77 @@ let
     exec ${lib.getExe cfg.package} "$@"
   '';
 
-  # macOS: Finder, Spotlight and login launch the bundle, not bin/, so the
-  # token needs a bundle too. It shares everything with the package's bundle
-  # except the executable, the token wrapper.
+  # macOS: Home Manager installs its own copy of the bundle in
+  # ~/Applications/larperCord.app. A real directory (not a store link) so it can
+  # be signed with a stable identity, and with its own Info.plist so Finder,
+  # Spotlight, the Dock and login launches get LARPER_TOKEN_FILE through
+  # LSEnvironment: the path travels, never the token.
   bundle = "Applications/larperCord.app";
-  tokenApp = pkgs.runCommand "larpercord-token-app" { } ''
-    # Real directories with links to each file, so symlinkJoin can merge it.
-    mkdir -p "$out/Applications"
-    cp -rs "${cfg.package}/${bundle}" "$out/${bundle}"
-    chmod -R u+w "$out/${bundle}"
-    rm "$out/${bundle}/Contents/MacOS/larpercord"
-    cat > "$out/${bundle}/Contents/MacOS/larpercord" <<'EOF'
-    #!${pkgs.runtimeShell}
-    if [ -r ${lib.escapeShellArg cfg.tokenFile} ]; then
-      LARPER_TOKEN="$(< ${lib.escapeShellArg cfg.tokenFile})"
-      export LARPER_TOKEN
+  appPath = "${config.home.homeDirectory}/${bundle}";
+  basePlist = cfg.package.passthru.darwinInfoPlist or null;
+  infoPlist =
+    if basePlist == null then
+      "${cfg.package}/${bundle}/Contents/Info.plist"
+    else
+      pkgs.writeText "larperCord-Info.plist" (
+        lib.generators.toPlist { escape = true; } (
+          basePlist
+          // {
+            LSEnvironment =
+              (basePlist.LSEnvironment or { })
+              // lib.optionalAttrs (cfg.tokenFile != null) { LARPER_TOKEN_FILE = cfg.tokenFile; };
+          }
+        )
+      );
+  signCommand = cfg.macos.codeSign.command;
+  installApp = pkgs.writeShellScript "larpercord-install-app" ''
+    set -euo pipefail
+    src=${lib.escapeShellArg "${cfg.package}/${bundle}"}
+    plist=${lib.escapeShellArg "${infoPlist}"}
+    sign=${lib.escapeShellArg (if signCommand == null then "" else signCommand)}
+    dest="$HOME/${bundle}"
+    state="$HOME/.local/state/larpercord"
+    want="$src"$'\n'"$plist"$'\n'"$sign"
+    if [[ "$(cat "$state/app.stamp" 2>/dev/null || true)" == "$want" && -x "$dest/Contents/MacOS/larpercord" ]]; then
+      exit 0
     fi
-    exec "${cfg.package}/${bundle}/Contents/MacOS/larpercord" "$@"
-    EOF
-    chmod 755 "$out/${bundle}/Contents/MacOS/larpercord"
+    mkdir -p "$HOME/Applications" "$state"
+    tmp="$HOME/Applications/.larperCord.app.new"
+    rm -rf "$tmp"
+    # -L: the bundle's Frameworks links (FFmpeg) become files, since a signed
+    # bundle may not link outside itself.
+    /bin/cp -RL "$src" "$tmp"
+    /bin/chmod -R u+w "$tmp"
+    /bin/cp "$plist" "$tmp/Contents/Info.plist"
+    /bin/chmod 644 "$tmp/Contents/Info.plist"
+    if [[ -n "$sign" ]]; then
+      # `<command> IDENTIFIER PATH`; the command may carry its own quoting.
+      /bin/sh -c "$sign \"\$1\" \"\$2\"" sign dev.larpercord "$tmp"
+    fi
+    /bin/rm -rf "$dest"
+    /bin/mv "$tmp" "$dest"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$dest" || true
+    printf '%s' "$want" > "$state/app.stamp"
+    echo "larpercord: installed $dest''${sign:+ (signed)}" >&2
+  '';
+
+  # The command line on macOS: the installed bundle (same identity as a Finder
+  # launch), falling back to the store copy before the first activation.
+  darwinBin = pkgs.writeShellScriptBin "larpercord" ''
+    ${lib.optionalString (
+      cfg.tokenFile != null
+    ) "export LARPER_TOKEN_FILE=${lib.escapeShellArg cfg.tokenFile}"}
+    : "''${FONTCONFIG_FILE:=${cfg.package.passthru.fontsConf or ""}}"
+    export FONTCONFIG_FILE
+    app="$HOME/${bundle}/Contents/MacOS/larpercord"
+    [ -x "$app" ] || app=${lib.escapeShellArg "${cfg.package}/${bundle}/Contents/MacOS/larpercord"}
+    exec "$app" "$@"
   '';
 
   finalPackage =
-    if cfg.tokenFile == null then
+    if isDarwin then
+      darwinBin
+    else if cfg.tokenFile == null then
       cfg.package
     else
       pkgs.symlinkJoin {
@@ -81,9 +129,6 @@ let
         # The first path wins where they overlap.
         paths = [
           tokenWrapper
-        ]
-        ++ lib.optional isDarwin tokenApp
-        ++ [
           cfg.package
         ];
         meta = (cfg.package.meta or { }) // {
@@ -106,7 +151,36 @@ in
       type = types.package;
       readOnly = true;
       default = finalPackage;
-      description = "The installed package, including the token wrapper when `tokenFile` is set.";
+      description = ''
+        What goes into `home.packages`: the package (with the token wrapper when
+        `tokenFile` is set) on Linux; on macOS only a `larpercord` command that
+        runs the installed `~/Applications/larperCord.app`.
+      '';
+    };
+
+    macos.appInstaller = mkOption {
+      type = types.package;
+      readOnly = true;
+      internal = true;
+      default = installApp;
+      description = "The script activation runs to install (and sign) ~/Applications/larperCord.app.";
+    };
+
+    macos.codeSign.command = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = lib.literalExpression ''
+        "''${lib.getExe osConfig.monke.codeSigning.package} sign"
+        # or: "/usr/bin/codesign --force --sign 'My Code Signing' --timestamp=none --identifier"
+      '';
+      description = ''
+        macOS: signs `~/Applications/larperCord.app` after each install, run as
+        `<command> dev.larpercord <app path>` as the user. With a stable
+        Keychain identity, privacy grants (the microphone for voice calls)
+        follow the certificate and bundle identifier instead of the ad-hoc
+        signature, which changes with every build. Null leaves the linker's
+        ad-hoc signatures.
+      '';
     };
 
     themes = mkOption {
@@ -147,8 +221,9 @@ in
       default = null;
       example = "/run/agenix/larpercord-token";
       description = ''
-        A file read at launch into `LARPER_TOKEN`, for example an agenix or
-        sops-nix secret. A string, not a path, so the token never enters the
+        A file read at launch into `LARPER_TOKEN` (on macOS passed to the app
+        as `LARPER_TOKEN_FILE`, which it reads itself, so Finder and login
+        launches get it too), for example an agenix or sops-nix secret. A string, not a path, so the token never enters the
         Nix store. The app never writes this token anywhere. Leave null to sign in
         through the app and its keyring.
       '';
@@ -182,6 +257,9 @@ in
       })
       (mkIf isDarwin {
         home.file = fileEntries "themes" ".kdl" cfg.themes // fileEntries "plugins" ".lua" cfg.plugins;
+        home.activation.larpercordApp = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+          run ${installApp}
+        '';
       })
       (mkIf (cfg.autostart && isLinux) {
         xdg.autostart = {
@@ -199,7 +277,7 @@ in
             ProgramArguments = [
               "/usr/bin/open"
               "-a"
-              "${cfg.finalPackage}/${bundle}"
+              appPath
             ];
             RunAtLoad = true;
             LimitLoadToSessionType = "Aqua";
