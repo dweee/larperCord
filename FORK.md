@@ -72,9 +72,26 @@ Home Manager (Linux and macOS):
 
 On macOS the client reads `~/Library/Application Support/larpercord` (and caches
 in `~/Library/Caches/larpercord`), so the module puts themes and plugins there.
-`autostart` is a launchd agent that opens the app at login. With `tokenFile`,
-the bundle gets the token wrapper too, so launches from Finder, Spotlight and
-login read the token, not only `bin/larpercord`.
+Activation installs a real copy of the bundle in `~/Applications/larperCord.app`
+(not a store link), and `larpercord` on `PATH` runs that copy. Its Info.plist
+passes `tokenFile` as `LARPER_TOKEN_FILE`, so Finder, Spotlight, Dock and login
+launches read the token too; the path travels, never the token. `autostart` is a
+launchd agent that opens that copy at login.
+
+To keep macOS privacy grants (the microphone for voice calls) across rebuilds,
+sign the copy with a stable Keychain identity. The command is run as
+`<command> dev.larpercord <app>`, which fits flakey's `monke-tcc-sign sign` (the
+shared `rotna Code Signing` identity) or a plain `codesign` call:
+
+```nix
+programs.larpercord.macos.codeSign.command =
+  "${lib.getExe osConfig.monke.codeSigning.package} sign";
+# or "/usr/bin/codesign --force --sign 'My Code Signing' --timestamp=none --identifier"
+```
+
+TCC then keys the grant to the certificate and `dev.larpercord`, not to the
+ad-hoc signature of each build. Without a command the copy keeps the linker's
+ad-hoc signatures and macOS asks again after updates.
 
 ## Source patches
 
@@ -85,6 +102,7 @@ login read the token, not only `bin/larpercord`.
 | `src/platform/sys.zig`, `src/net/rpc_ipc.zig` | macOS has no `SOCK_CLOEXEC`: `socketCloexec` sets `FD_CLOEXEC` with `fcntl`. Rich Presence uses the BSD `sockaddr_un` layout and `MSG_DONTWAIT` value. |
 | `src/platform/sys.zig` | macOS folders: `~/Library/Application Support` and `~/Library/Caches`, ignoring the XDG variables (a Finder launch never sees them; a shell that sets them would split the config by launch method). Temp files in the per-user `$TMPDIR`. `selfExe` via `_NSGetExecutablePath` + `realpath`; process memory via `TASK_VM_INFO`; the tray needs no D-Bus probe. |
 | `src/platform/sys.zig`, `src/net/accounts_store.zig`, `src/platform/apagar.zig`, `src/net/discord.zig` | Keychain: tokens go to the login Keychain through `/usr/bin/security` as service `larpercord-account`, account = account ID, like the Linux `secret-tool` entry. The secret goes over stdin (`security -i`), never argv, and only `[A-Za-z0-9._-]` values are accepted. The Apple-signed CLI keeps each item's ACL stable across updates; Security.framework would tie it to the ad-hoc-signed binary, which changes with every build, and macOS would ask again after each update. "Delete all data" removes every `larpercord-account` item. The pre-multi-account legacy entry is Linux-only, as on Windows. |
+| `src/net/discord.zig` | `LARPER_TOKEN_FILE`: a path to an owner-only file read once at startup like `LARPER_TOKEN`, then both variables are removed from the environment. Launches without a shell (an app bundle's `LSEnvironment`, launchd agents) can pass the path; the token never goes into a plist or an environment. |
 | `src/app.zig` | Notifications through `osascript` `display notification`, title and body passed as script arguments. |
 | `src/platform/tray.zig` | macOS uses `SDL_CreateTray` (a menu bar item) like Windows, not the Linux D-Bus helper process. |
 | `src/platform/vigia.zig` | Theme/mascot folders are watched with kqueue: the folders and every file in them, re-armed after each event. |
@@ -121,18 +139,22 @@ for the Keychain and a different updater; those parts were not taken.
 - The in-app updater needs no patch on Linux. Upstream already detects a
   read-only install directory and shows "Installed by a package manager:
   update through it" instead of installing.
-- macOS (`aarch64-darwin` only; nixpkgs 26.11 dropped x86_64-darwin): the
-  bundle's executable is a binary wrapper that sets `FONTCONFIG_FILE`
-  (overridable). Nix's fontconfig looks for `/etc/fonts`, which macOS lacks;
+- macOS (`aarch64-darwin` only; nixpkgs 26.11 dropped x86_64-darwin):
+  fontconfig gets a generated `FONTCONFIG_FILE` (overridable). Nix's fontconfig looks for `/etc/fonts`, which macOS lacks;
   the generated config reads `/System/Library/Fonts`, `/Library/Fonts` and
   `~/Library/Fonts`, where nix-darwin and Home Manager put fonts. FFmpeg's
   dylibs are linked into `Contents/Frameworks`. CA certificates come from
   `/etc/ssl/cert.pem` (part of macOS) or nix-darwin's
   `/etc/ssl/certs/ca-certificates.crt`, through upstream's bundle list.
+  The bundle's executable is the client itself, not a wrapper: whatever signs
+  the bundle signs the process that runs and asks for the microphone. Finder and
+  `open` launches get `FONTCONFIG_FILE` from `LSEnvironment`; `bin/larpercord`
+  is a binary wrapper outside the bundle. Only the five FFmpeg libraries the
+  client uses are in `Contents/Frameworks`.
   Keychain, notifications and links (`SDL_OpenURL` → NSWorkspace) use the
   system's own tools. The `.icns` is rendered from `assets/icon-terminal.svg`.
-  The binaries are ad-hoc signed by the linker. The bundle as a whole is not
-  signed or notarized.
+  The store bundle keeps the linker's ad-hoc signatures and is not notarized;
+  the Home Manager copy can be signed with a stable identity (see above).
 - `larpercord-windows` also builds on aarch64-darwin. It is the same target and
   inputs, but not byte-identical to the x86_64-linux build (the Zig hosts
   differ). The `windows-latest` runtime smoke test runs the Linux-built zip.
@@ -215,7 +237,10 @@ Leave it off on NixOS.
   `nix/macos-probe`. The probe is compiled against the client's own
   `sys.zig`/`ffmpeg.zig`: a Keychain round trip under a test service (deleted
   afterwards), FFmpeg loaded from a bundle's `Contents/Frameworks`, and
-  `SDL_OpenURL`.
+  `SDL_OpenURL`. It also installs the Home Manager copy, signs it with a
+  throwaway self-signed identity made the way `monke-tcc-sign` makes its own,
+  checks the signature carries `certificate leaf` and `dev.larpercord`, and
+  starts it from the launchd agent with `LARPER_TOKEN_FILE`.
 - `upstream-sync.yml` calls the pinned dave-fork-ci controller. It tracks
   upstream **releases** (`.fork-ci.json`) and stays inert until the repository
   variable `GUARDED_UPSTREAM_SYNC_ENABLED` is `true`.

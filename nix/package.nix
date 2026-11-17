@@ -67,26 +67,32 @@ let
 
   app = "$out/Applications/larperCord.app";
 
-  infoPlist = writeText "Info.plist" (
-    lib.generators.toPlist { escape = true; } {
-      CFBundleDevelopmentRegion = "en";
-      CFBundleDisplayName = "larperCord";
-      CFBundleExecutable = "larpercord";
-      CFBundleIconFile = "larperCord";
-      CFBundleIdentifier = "dev.larpercord";
-      CFBundleInfoDictionaryVersion = "6.0";
-      CFBundleName = "larperCord";
-      CFBundlePackageType = "APPL";
-      CFBundleShortVersionString = version;
-      CFBundleVersion = version;
-      LSApplicationCategoryType = "public.app-category.social-networking";
-      LSMinimumSystemVersion = stdenv.hostPlatform.darwinMinVersion;
-      NSHighResolutionCapable = true;
-      NSSupportsAutomaticGraphicsSwitching = true;
-      # Voice calls: without this macOS refuses the microphone outright.
-      NSMicrophoneUsageDescription = "larperCord uses the microphone in voice calls.";
-    }
-  );
+  # The bundle's Info.plist. Home Manager writes its own copy (with a token
+  # path) from the same attributes, hence passthru.darwinInfoPlist.
+  darwinInfoPlist = {
+    CFBundleDevelopmentRegion = "en";
+    CFBundleDisplayName = "larperCord";
+    CFBundleExecutable = "larpercord";
+    CFBundleIconFile = "larperCord";
+    CFBundleIdentifier = "dev.larpercord";
+    CFBundleInfoDictionaryVersion = "6.0";
+    CFBundleName = "larperCord";
+    CFBundlePackageType = "APPL";
+    CFBundleShortVersionString = version;
+    CFBundleVersion = version;
+    LSApplicationCategoryType = "public.app-category.social-networking";
+    LSMinimumSystemVersion = stdenv.hostPlatform.darwinMinVersion;
+    NSHighResolutionCapable = true;
+    NSSupportsAutomaticGraphicsSwitching = true;
+    # Voice calls: without this macOS refuses the microphone outright.
+    NSMicrophoneUsageDescription = "larperCord uses the microphone in voice calls.";
+    # Launches through LaunchServices (Finder, Dock, `open`, login items) get
+    # the environment from here: no exec wrapper in the bundle, so the
+    # process that runs (and asks for the microphone) is the bundle's own
+    # signed executable. bin/larpercord sets the same for the command line.
+    LSEnvironment.FONTCONFIG_FILE = "${darwinFontsConf}";
+  };
+  infoPlist = writeText "Info.plist" (lib.generators.toPlist { escape = true; } darwinInfoPlist);
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "larpercord";
@@ -154,7 +160,6 @@ stdenv.mkDerivation (finalAttrs: {
       rsvg-convert -w 1024 -h 1024 assets/icon-terminal.svg -o icon-1024.png
       python3 -c 'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])' \
         icon-1024.png ${app}/Contents/Resources/larperCord.icns
-      ln -s ../Applications/larperCord.app/Contents/MacOS/larpercord $out/bin/larpercord
     ''
     + ''
       source ${./install-notices.sh}
@@ -192,14 +197,22 @@ stdenv.mkDerivation (finalAttrs: {
     ''
     + lib.optionalString isDarwin (
       ''
-        wrapProgram ${app}/Contents/MacOS/larpercord \
+        makeWrapper ${app}/Contents/MacOS/larpercord $out/bin/larpercord \
           --set-default FONTCONFIG_FILE ${darwinFontsConf}
       ''
       + lib.optionalString withFfmpeg ''
         mkdir -p ${app}/Contents/Frameworks
-        for lib in ${lib.getLib ffmpeg-headless}/lib/lib*.dylib; do
-          ln -s "$lib" ${app}/Contents/Frameworks/
+        # The four the client loads (by their libX.N.dylib names) and
+        # libswresample, which libavcodec needs. Their own dependencies stay
+        # in the store, referenced by absolute install names.
+        for name in avutil swscale swresample avcodec avformat; do
+          for lib in ${lib.getLib ffmpeg-headless}/lib/lib$name.*.dylib; do
+            if [[ $(basename "$lib") =~ ^lib$name\.[0-9]+\.dylib$ ]]; then
+              ln -s "$lib" ${app}/Contents/Frameworks/
+            fi
+          done
         done
+        test "$(ls ${app}/Contents/Frameworks | wc -l)" -eq 5
       ''
     );
 
@@ -207,6 +220,7 @@ stdenv.mkDerivation (finalAttrs: {
     inherit withFfmpeg;
     curl = curlWs;
     fontsConf = if isDarwin then darwinFontsConf else null;
+    darwinInfoPlist = if isDarwin then darwinInfoPlist else null;
   };
 
   meta = {

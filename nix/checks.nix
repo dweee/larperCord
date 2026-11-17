@@ -19,6 +19,13 @@ let
   homeDirectory = if isDarwin then "/Users/larper" else "/home/larper";
   # macOS has no /run; the macOS runtime CI job writes a dummy token here.
   tokenFile = if isDarwin then "/tmp/larpercord-check-token" else "/run/agenix/larpercord-token";
+  # Stands in for a real signer such as flakey's `monke-tcc-sign sign`: same
+  # `<command> IDENTIFIER PATH` call, and it records each call. The macOS
+  # runtime CI job signs the installed bundle with a real Keychain identity.
+  fakeSigner = pkgs.writeShellScript "fake-signer" ''
+    [ "$1" = dev.larpercord ] && [ -x "$2/Contents/MacOS/larpercord" ] || exit 1
+    echo "$1" >> "$HOME/.larpercord-signed"
+  '';
 
   # A minimal NixOS system around the module, plus `extra`.
   mkSystem =
@@ -119,6 +126,7 @@ let
           plugins.hello = ./checks/hello.lua;
           inherit tokenFile;
           autostart = true;
+          macos.codeSign.command = "${fakeSigner}";
         };
       }
     ];
@@ -228,16 +236,16 @@ let
         final = hmConfig.config.programs.larpercord.finalPackage;
         bin = "${final}/bin/larpercord";
         agent = "${hmConfig.config.home.activationPackage}/LaunchAgents/dev.larpercord.plist";
-        app = "${final}/Applications/larperCord.app";
+        installer = hmConfig.config.programs.larpercord.macos.appInstaller;
       in
       pkgs.runCommand "larpercord-hm-module"
         (
           frameEnv
           // {
             nativeBuildInputs = [ pkgs.imagemagick ];
-            # For the macOS runtime CI job: the token bundle and the launchd agent.
+            # For the macOS runtime CI job: the app installer and the launchd agent.
             passthru = {
-              inherit final;
+              inherit final installer;
               activation = hmConfig.config.home.activationPackage;
             };
           }
@@ -280,16 +288,41 @@ let
           + lib.optionalString isLinux ''
             test -e ${files}/.config/autostart/dev.larpercord.desktop
           ''
-          # Autostart is a launchd agent that opens the token-aware bundle, and
-          # that bundle's executable reads the token before starting the app.
+          # Activation installs a signed copy of the bundle in ~/Applications
+          # whose Info.plist passes the token path; autostart opens that copy.
           + lib.optionalString isDarwin ''
             # Home Manager runs it as `/bin/sh -c '/bin/wait4path /nix/store && exec …'`.
-            grep -qF 'exec /usr/bin/open -a ${app}</string>' ${agent}
+            grep -qF 'exec /usr/bin/open -a ${homeDirectory}/Applications/larperCord.app</string>' ${agent}
             grep -q '<string>dev.larpercord</string>' ${agent}
-            grep -q LARPER_TOKEN ${app}/Contents/MacOS/larpercord
-            grep -q ${tokenFile} ${app}/Contents/MacOS/larpercord
-            grep -q '<string>dev.larpercord</string>' ${app}/Contents/Info.plist
-            test -e ${app}/Contents/Resources/larperCord.icns
+            grep -q larpercord-install-app ${hmConfig.config.home.activationPackage}/activate
+            grep -q LARPER_TOKEN_FILE ${bin}
+
+            # The installer, as activation runs it, in a scratch home.
+            export HOME=$TMPDIR/apphome
+            mkdir -p $HOME
+            ${installer}
+            app=$HOME/Applications/larperCord.app
+            test -x $app/Contents/MacOS/larpercord
+            test ! -L $app/Contents/MacOS/larpercord
+            grep -q '<string>dev.larpercord</string>' $app/Contents/Info.plist
+            grep -q '<key>LARPER_TOKEN_FILE</key>' $app/Contents/Info.plist
+            grep -q '<string>${tokenFile}</string>' $app/Contents/Info.plist
+            grep -q '<key>FONTCONFIG_FILE</key>' $app/Contents/Info.plist
+            test -e $app/Contents/Resources/larperCord.icns
+            # FFmpeg copied into the bundle, not linked out of it.
+            ls $app/Contents/Frameworks/libavformat.*.dylib >/dev/null
+            if find $app -type l | grep -q .; then
+              echo "the installed bundle still links outside itself" >&2
+              exit 1
+            fi
+            test "$(cat $HOME/.larpercord-signed)" = dev.larpercord
+            # Unchanged inputs: no second copy or signature.
+            ${installer}
+            test "$(wc -l < $HOME/.larpercord-signed)" -eq 1
+            # The command runs the installed copy.
+            ${bin} --version | grep -qx 'larperCord ${pkg.version}'
+            timeout 120 ${bin} --theme nix-test --shot $TMPDIR/installed.png
+            test -s $TMPDIR/installed.png
           ''
           + ''
             touch $out
