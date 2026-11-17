@@ -4921,7 +4921,7 @@ var env_token: ?[:0]u8 = null;
 
 /// Só o token guardado na entrada antiga (chaveiro, depois o arquivo).
 pub fn loadSavedToken() ?[:0]u8 {
-    if (sys.windows) return null; // A entrada antiga só existe no Linux.
+    if (sys.windows or sys.macos) return null; // A entrada antiga só existe no Linux.
     if (c.popen("secret-tool lookup service larpercord 2>/dev/null", "r")) |f| {
         var buf: [256]u8 = undefined;
         const n = c.fread(&buf, 1, buf.len, f);
@@ -4955,7 +4955,7 @@ fn tokenFilePath(buf: []u8) ?[:0]const u8 {
 
 /// "Sair": apaga o token do chaveiro e do arquivo.
 pub fn forgetToken() void {
-    if (sys.windows) return;
+    if (sys.windows or sys.macos) return;
     if (c.popen("secret-tool clear service larpercord 2>/dev/null", "r")) |f| _ = c.pclose(f);
     var pbuf: [512]u8 = undefined;
     if (tokenFilePath(&pbuf)) |p| _ = c.unlink(p.ptr);

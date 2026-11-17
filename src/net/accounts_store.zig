@@ -4,6 +4,9 @@
 //!
 //!   secret-tool store --label='larperCord (conta ID)' service larpercord-account account ID
 //!
+//! No macOS, a mesma entrada no Chaveiro (o `security` do sistema, ver
+//! sys.keychainWrite): serviço larpercord-account, conta ID.
+//!
 //! Sem chaveiro, em ~/.config/larpercord/tokens/ID (pasta 700, arquivo 600),
 //! como o token único de antes. A entrada antiga (`service larpercord`,
 //! discord.zig) continua valendo para a conta que já estava nela.
@@ -75,6 +78,13 @@ pub fn tokenFor(acc: *const accounts.Account) ?[:0]u8 {
         var buf: [256]u8 = undefined;
         defer std.crypto.secureZero(u8, &buf);
         if (sys.credRead(target.ptr, &buf)) |s| if (trimmed(s)) |t| return t;
+    } else if (sys.macos) {
+        var ib: [24]u8 = undefined;
+        var buf: [256]u8 = undefined;
+        defer std.crypto.secureZero(u8, &buf);
+        if (std.fmt.bufPrint(&ib, "{d}", .{acc.id})) |account| {
+            if (sys.keychainRead("larpercord-account", account, &buf)) |s| if (trimmed(s)) |t| return t;
+        } else |_| {}
     } else {
         const cmd = std.fmt.bufPrintSentinel(&cbuf, "secret-tool lookup service larpercord-account account {d} 2>/dev/null", .{acc.id}, 0) catch return null;
         if (c.popen(cmd.ptr, "r")) |f| {
@@ -116,6 +126,15 @@ pub fn storeToken(id: Id, token: []const u8) Saved {
             if (path) |p| _ = c.unlink(p.ptr);
             return .keyring;
         }
+    } else if (sys.macos) {
+        var ib: [24]u8 = undefined;
+        var lb: [64]u8 = undefined;
+        const account = std.fmt.bufPrint(&ib, "{d}", .{id}) catch return .failed;
+        const label = std.fmt.bufPrint(&lb, "larperCord (conta {d})", .{id}) catch return .failed;
+        if (sys.keychainWrite("larpercord-account", account, label, token)) {
+            if (path) |p| _ = c.unlink(p.ptr);
+            return .keyring;
+        }
     } else {
         const cmd = std.fmt.bufPrintSentinel(&cbuf, "secret-tool store --label='larperCord (conta {d})' service larpercord-account account {d} 2>/dev/null", .{ id, id }, 0) catch return .failed;
         if (c.popen(cmd.ptr, "w")) |f| {
@@ -138,6 +157,8 @@ pub fn forgetToken(acc: *const accounts.Account) void {
     var cbuf: [160]u8 = undefined;
     if (sys.windows) {
         if (credTarget(&cbuf, acc.id)) |target| sys.credDelete(target.ptr);
+    } else if (sys.macos) {
+        if (std.fmt.bufPrint(&cbuf, "{d}", .{acc.id})) |account| sys.keychainDelete("larpercord-account", account) else |_| {}
     } else if (std.fmt.bufPrintSentinel(&cbuf, "secret-tool clear service larpercord-account account {d} 2>/dev/null", .{acc.id}, 0)) |cmd| {
         if (c.popen(cmd.ptr, "r")) |f| _ = c.pclose(f);
     } else |_| {}

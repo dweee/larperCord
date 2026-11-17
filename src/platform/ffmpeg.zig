@@ -306,7 +306,9 @@ fn search(dg: *Diag) bool {
             else => {},
         }
     }
-    if (!off) {
+    if (!off and busca.native == .macos) {
+        if (loadMacos(dg)) return true;
+    } else if (!off) {
         useLocalDir();
         for (sets) |s| if (loadSet(s, null, dg)) return done(s, .system, "");
     }
@@ -315,7 +317,7 @@ fn search(dg: *Diag) bool {
     const scan = busca.scanPath(path_env.text, busca.native, isFile);
     // A busca do LoadLibrary pode não olhar o PATH (a busca segura de DLLs): cada
     // pasta dele com as DLLs vai pelo caminho inteiro.
-    if (!off and busca.native == .windows) if (scan.libs_dir) |dir| if (loadFrom(dir, scan.libs, dg)) return done(scan.libs, .path, dir);
+    if (!off and busca.native != .linux) if (scan.libs_dir) |dir| if (loadFrom(dir, scan.libs, dg)) return done(scan.libs, .path, dir);
     if (scan.exe_dir) |e| {
         dg.exe_dir.set(e);
         dg.exe_check = scan.exe_check;
@@ -324,7 +326,7 @@ fn search(dg: *Diag) bool {
         dg.other = scan.other;
         dg.other_dir.set(o);
     }
-    if (!off and busca.native == .linux) systemLibs(dg);
+    if (!off and busca.native != .windows) systemLibs(dg);
     return false;
 }
 
@@ -371,12 +373,35 @@ const PathEnv = struct {
 };
 
 /// Onde as distribuições põem as bibliotecas: só para dizer qual versão o sistema tem.
+/// No macOS, onde o app carrega (o Homebrew, o /usr/local e o MacPorts).
 const triple = @tagName(@import("builtin").cpu.arch) ++ "-linux-gnu";
-const lib_dirs = [_][]const u8{ "/usr/lib", "/usr/lib64", "/usr/lib/" ++ triple, "/lib/" ++ triple, "/usr/local/lib", "/lib64", "/lib" };
+const lib_dirs = if (busca.native == .macos)
+    [_][]const u8{ "/opt/homebrew/lib", "/usr/local/lib", "/opt/local/lib" }
+else
+    [_][]const u8{ "/usr/lib", "/usr/lib64", "/usr/lib/" ++ triple, "/lib/" ++ triple, "/usr/local/lib", "/lib64", "/lib" };
+
+/// macOS: só por caminho inteiro. Pelo nome, o dlopen olharia também a pasta atual.
+/// Na ordem: o Contents/Frameworks do .app (onde um pacote põe o FFmpeg junto) e as
+/// pastas de `lib_dirs`.
+fn loadMacos(dg: *Diag) bool {
+    var eb: [1024]u8 = undefined;
+    var fb: [1100]u8 = undefined;
+    if (@import("sys.zig").selfExe(&eb)) |exe| if (std.fs.path.dirname(exe)) |d| {
+        if (std.fmt.bufPrint(&fb, "{s}/../Frameworks", .{d})) |dir| switch (checkDir(dir)) {
+            .ok => |s| if (loadFrom(dir, s, dg)) return done(s, .system, dir),
+            else => {},
+        } else |_| {}
+    };
+    for (lib_dirs) |dir| switch (checkDir(dir)) {
+        .ok => |s| if (loadFrom(dir, s, dg)) return done(s, .system, dir),
+        else => {},
+    };
+    return false;
+}
 
 fn systemLibs(dg: *Diag) void {
     for (lib_dirs) |dir| {
-        const ch = busca.check(dir, .linux, isFile);
+        const ch = busca.check(dir, busca.native, isFile);
         const better = switch (ch) {
             .ok => dg.system != .ok,
             .incomplete => dg.system != .ok and dg.system != .incomplete,

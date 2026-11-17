@@ -7,7 +7,8 @@
 //! fecha. No mesmo processo, cada ida à bandeja somaria um ícone. Esse processo
 //! fala StatusNotifierItem direto pelo D-Bus (platform/sni.zig), sem GTK e parado
 //! até o painel ou o app falarem; sem libdbus ou sem sessão D-Bus, fica o
-//! SDL_CreateTray (libappindicator) de antes. No Windows é o SDL_CreateTray.
+//! SDL_CreateTray (libappindicator) de antes. No Windows e no macOS (o ícone na
+//! barra de menus) é o SDL_CreateTray.
 //!
 //! Clicar no próprio ícone: o botão esquerdo alterna a janela (ver
 //! janela.trayClick) e o direito abre o menu com Abrir e Sair. No Linux pelo
@@ -106,7 +107,7 @@ pub fn show(wake: u32, open_label: [*:0]const u8, quit_label: [*:0]const u8, wai
     wake_type = wake;
     last_open = open_label;
     last_quit = quit_label;
-    if (!sys.windows) return startHelper(open_label, quit_label, wait);
+    if (!sys.windows and !sys.macos) return startHelper(open_label, quit_label, wait);
     tray = build(open_label, quit_label, onOpen, onQuit);
     if (tray != null) hookClicks();
     return tray != null;
