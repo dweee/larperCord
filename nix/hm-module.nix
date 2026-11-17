@@ -14,13 +14,22 @@ let
     types
     ;
 
-  # Text or a path, written under ~/.config/larpercord/<dir>/<name><ext>.
+  # A file to link: a path, a derivation, or a single-line absolute path
+  # string ("/run/…", "${pkg}/x.kdl"). Anything else is the file's text. A
+  # multi-line value is always text, even when it starts with a `//` comment.
+  isFileSource =
+    value:
+    builtins.isPath value
+    || lib.isDerivation value
+    || (types.path.check value && !(lib.hasInfix "\n" value));
+
+  # Written under ~/.config/larpercord/<dir>/<name><ext>.
   fileEntries =
     dir: ext: attrs:
     lib.mapAttrs' (
       name: value:
       lib.nameValuePair "larpercord/${dir}/${name}${ext}" (
-        if builtins.isPath value || lib.isDerivation value then { source = value; } else { text = value; }
+        if isFileSource value then { source = value; } else { text = value; }
       )
     ) attrs;
 
@@ -82,8 +91,10 @@ in
       '';
       description = ''
         KDL themes placed in `$XDG_CONFIG_HOME/larpercord/themes/<name>.kdl`.
-        They are read-only store links: edit the source and switch to see the
-        change, since the app reloads on file change.
+        Each value is a path (a Nix path, a derivation, or a single-line
+        absolute path string) to link, or the theme's text. The files are
+        read-only links: edit the source and switch, and the app reloads the
+        changed file.
       '';
     };
 
@@ -92,8 +103,9 @@ in
       default = { };
       example = lib.literalExpression "{ hello = ./hello.lua; }";
       description = ''
-        Lua plugins placed in `$XDG_CONFIG_HOME/larpercord/plugins/<name>.lua`.
-        Plugins still have to be turned on in Settings → Plugins.
+        Lua plugins placed in `$XDG_CONFIG_HOME/larpercord/plugins/<name>.lua`,
+        given as a path or as text like `themes`. Plugins still have to be
+        turned on in Settings → Plugins.
       '';
     };
 

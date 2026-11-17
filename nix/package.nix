@@ -73,7 +73,8 @@ stdenv.mkDerivation (finalAttrs: {
     done
     install -Dm644 assets/logo-mark.svg \
       $out/share/icons/hicolor/scalable/apps/larpercord.svg
-    install -Dm644 LICENSE $out/share/licenses/larpercord/LICENSE
+    source ${./install-notices.sh}
+    installNotices $out/share/licenses/larpercord
   '';
 
   # Runtime-only helpers: the keyring (secret-tool), notifications

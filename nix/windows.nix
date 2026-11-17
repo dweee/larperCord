@@ -60,13 +60,16 @@ stdenvNoCC.mkDerivation {
   # Assemble .deps/windows exactly as tools/windows_deps.sh lays it out.
   postPatch = ''
     out_deps=.deps/windows
-    mkdir -p $out_deps/include $out_deps/lib $out_deps/bin $out_deps/src/freetype
+    mkdir -p $out_deps/include $out_deps/lib $out_deps/bin $out_deps/src/freetype $out_deps/licenses
     for p in ${lib.escapeShellArgs msysPackages}; do
       t=$(mktemp -d)
       tar --zstd -xf "$p" -C "$t"
       cp -r "$t"/ucrt64/include/. $out_deps/include/ 2>/dev/null || true
       find "$t/ucrt64/lib" -maxdepth 1 -name '*.a' -exec cp {} $out_deps/lib/ \;
       find "$t/ucrt64/bin" -maxdepth 1 -name '*.dll' -exec cp {} $out_deps/bin/ \; 2>/dev/null || true
+      # Static libraries (opus, zlib, libwebp) end up in the .exe and OpenSSL ships
+      # as a DLL: their notices travel with the build.
+      cp -r "$t"/ucrt64/share/licenses/. $out_deps/licenses/
       rm -rf "$t"
     done
 
@@ -74,15 +77,24 @@ stdenvNoCC.mkDerivation {
     cp -r "$t"/SDL3-*/x86_64-w64-mingw32/include/. $out_deps/include/
     cp "$t"/SDL3-*/x86_64-w64-mingw32/lib/libSDL3.dll.a $out_deps/lib/
     cp "$t"/SDL3-*/x86_64-w64-mingw32/bin/SDL3.dll $out_deps/bin/
+    install -Dm644 "$t"/SDL3-*/LICENSE.txt $out_deps/licenses/SDL3/LICENSE.txt
     rm -rf "$t"
 
     t=$(mktemp -d); unzip -q ${curl} -d "$t"
     cp -r "$t"/curl-*/include/curl $out_deps/include/
     cp "$t"/curl-*/lib/libcurl.dll.a $out_deps/lib/
     cp "$t"/curl-*/bin/libcurl-x64.dll $out_deps/bin/
+    # The official curl build links its dependencies into the DLL.
+    install -Dm644 "$t"/curl-*/COPYING.txt $out_deps/licenses/curl/COPYING.txt
+    root=$PWD
+    (cd "$t"/curl-*/dep && find . -type f \( -iname 'COPYING*' -o -iname 'LICENSE*' \) \
+      -exec install -Dm644 {} "$root/$out_deps/licenses/curl/dep/{}" \;)
     rm -rf "$t"
 
     tar -xf ${freetype} -C $out_deps/src/freetype --strip-components=1
+    # FreeType is compiled into the .exe under its FreeType License.
+    install -Dm644 $out_deps/src/freetype/LICENSE.TXT $out_deps/licenses/freetype/LICENSE.TXT
+    install -Dm644 $out_deps/src/freetype/docs/FTL.TXT $out_deps/licenses/freetype/FTL.TXT
 
     find $out_deps/bin -name '*.dll' ${
       lib.concatMapStringsSep " " (d: "! -name ${lib.escapeShellArg d}") shippedDlls
@@ -100,9 +112,19 @@ stdenvNoCC.mkDerivation {
   dontFixup = true;
 
   postInstall = ''
-    install -Dm644 LICENSE $out/share/licenses/larpercord/LICENSE
-    # A portable zip, laid out like the upstream release.
-    (cd $out/bin && zip -q -9 $out/larpercord-windows-x86_64.zip larpercord.exe ${lib.concatStringsSep " " shippedDlls})
+    source ${./install-notices.sh}
+    installNotices $out/share/licenses/larpercord
+    cp -r .deps/windows/licenses $out/share/licenses/larpercord/windows
+
+    # A portable zip, laid out like the upstream release (the executable and
+    # its DLLs side by side) plus the notices. Fixed timestamps and order, no
+    # extra fields, so identical inputs give an identical archive.
+    stage=$TMPDIR/zip
+    mkdir -p $stage
+    cp $out/bin/larpercord.exe ${lib.concatMapStringsSep " " (d: "$out/bin/${d}") shippedDlls} $stage/
+    cp -r $out/share/licenses/larpercord $stage/licenses
+    find $stage -exec touch -h -d @$SOURCE_DATE_EPOCH {} +
+    (cd $stage && find . -type f -printf '%P\n' | LC_ALL=C sort | zip -q -9 -X -D $out/larpercord-windows-x86_64.zip -@)
   '';
 
   meta = {

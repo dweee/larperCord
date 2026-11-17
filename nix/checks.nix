@@ -56,6 +56,8 @@ let
           # an inline one to cover the `lines` form.
           themes.nix-test = nixTestTheme;
           themes.inline = builtins.readFile nixTestTheme;
+          # An absolute path given as a string is linked, not written as text.
+          themes.by-string = "${nixTestTheme}";
           plugins.hello = ./checks/hello.lua;
           tokenFile = "/run/agenix/larpercord-token";
           autostart = true;
@@ -66,6 +68,17 @@ let
 in
 {
   package = pkg;
+
+  # The license and every vendored library's notice ship with the package.
+  notices = pkgs.runCommand "larpercord-notices" { } ''
+    d=${pkg}/share/licenses/larpercord
+    for f in LICENSE third_party/rnnoise/COPYING third_party/imgui/LICENSE.txt \
+      third_party/lua/LICENSE third_party/fribidi/COPYING third_party/libdave/LICENSE \
+      third_party/mlspp/LICENSE third_party/nlohmann/NOTICE third_party/stb/LICENSE; do
+      test -s $d/$f
+    done
+    touch $out
+  '';
 
   # Draws one frame of the built-in demo offscreen and checks the PNG. Proves
   # the binary links, finds fonts through fontconfig and renders without a GPU.
@@ -93,6 +106,7 @@ in
     pkgs.runCommand "larpercord-hm-module" frameEnv ''
       cmp ${nixTestTheme} ${files}/.config/larpercord/themes/nix-test.kdl
       cmp ${nixTestTheme} ${files}/.config/larpercord/themes/inline.kdl
+      cmp ${nixTestTheme} ${files}/.config/larpercord/themes/by-string.kdl
       cmp ${./checks/hello.lua} ${files}/.config/larpercord/plugins/hello.lua
 
       # The app loads the module's theme from the read-only config tree: its
@@ -126,5 +140,20 @@ in
     pkgs.writeText "larpercord-nixos-module" (builtins.toJSON { inherit names fonts; });
 }
 // lib.optionalAttrs (system == "x86_64-linux") {
-  windows = self.packages.${system}.larpercord-windows;
+  # The portable zip carries the license and the notices of everything linked
+  # into the .exe or shipped beside it.
+  windows =
+    let
+      win = self.packages.${system}.larpercord-windows;
+    in
+    pkgs.runCommand "larpercord-windows-zip" { nativeBuildInputs = [ pkgs.unzip ]; } ''
+      unzip -Z1 ${win}/larpercord-windows-x86_64.zip > files
+      for f in larpercord.exe SDL3.dll libcurl-x64.dll libcrypto-3-x64.dll licenses/LICENSE \
+        licenses/third_party/rnnoise/COPYING licenses/windows/SDL3/LICENSE.txt \
+        licenses/windows/curl/COPYING.txt licenses/windows/openssl/LICENSE \
+        licenses/windows/freetype/FTL.TXT; do
+        grep -qx "$f" files
+      done
+      touch $out
+    '';
 }
