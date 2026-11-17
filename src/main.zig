@@ -52,6 +52,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Antes de qualquer thread (platform/mem_tune.zig).
     @import("platform/mem_tune.zig").init();
     sys.init();
+    // Antes de qualquer processo filho: o token não fica no ambiente herdado.
+    @import("net/discord.zig").takeEnvToken();
     var opts: Options = .{};
     var restarted = false;
     var it = if (sys.windows) try std.process.Args.Iterator.initAllocator(init.args, std.heap.c_allocator) else std.process.Args.Iterator.init(init.args);

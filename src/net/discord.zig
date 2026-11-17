@@ -4832,12 +4832,32 @@ pub fn loadToken() ?[:0]u8 {
     return envToken() orelse loadSavedToken();
 }
 
-/// Só a variável LARPER_TOKEN (nunca é guardada em lugar nenhum).
+/// Só a variável LARPER_TOKEN (nunca é guardada em lugar nenhum). Lida uma vez e
+/// tirada do ambiente do processo e do SDL: os filhos (notify-send, secret-tool,
+/// xdg-open, plugins) não herdam o token. Cada chamada devolve uma cópia nova.
+/// / Read once and removed from the process and SDL environments so spawned
+/// helpers do not inherit the token; every call returns a fresh copy.
 pub fn envToken() ?[:0]u8 {
-    const t = c.SDL_getenv("LARPER_TOKEN") orelse return null;
-    const s = std.mem.trim(u8, std.mem.span(t), " \n\r\t");
-    return if (s.len > 20) alloc.dupeSentinel(u8, s, 0) catch null else null;
+    takeEnvToken();
+    const t = env_token orelse return null;
+    return alloc.dupeSentinel(u8, t, 0) catch null;
 }
+
+/// Tira LARPER_TOKEN do ambiente (uma vez, na abertura, antes de qualquer filho).
+/// / Moves LARPER_TOKEN out of the environment; main calls it at startup.
+pub fn takeEnvToken() void {
+    if (env_token_read) return;
+    env_token_read = true;
+    if (c.SDL_getenv("LARPER_TOKEN")) |t| {
+        const s = std.mem.trim(u8, std.mem.span(t), " \n\r\t");
+        if (s.len > 20) env_token = alloc.dupeSentinel(u8, s, 0) catch null;
+    }
+    _ = c.SDL_UnsetEnvironmentVariable(c.SDL_GetEnvironment(), "LARPER_TOKEN");
+    if (sys.windows) _ = c.SetEnvironmentVariableA("LARPER_TOKEN", null) else _ = c.unsetenv("LARPER_TOKEN");
+}
+
+var env_token_read = false;
+var env_token: ?[:0]u8 = null;
 
 /// Só o token guardado na entrada antiga (chaveiro, depois o arquivo).
 pub fn loadSavedToken() ?[:0]u8 {
