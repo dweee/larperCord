@@ -200,7 +200,7 @@ jobs:
           mkdir -p "$probe_app/Contents/MacOS"
           ln -s "$PWD/app/Applications/larperCord.app/Contents/Frameworks" "$probe_app/Contents/Frameworks"
           cp "$RUNNER_TEMP/probe" "$probe_app/Contents/MacOS/probe"
-          "$probe_app/Contents/MacOS/probe" ffmpeg | tee probe-ffmpeg.txt
+          "$probe_app/Contents/MacOS/probe" ffmpeg 2>&1 | tee probe-ffmpeg.txt
           grep -q 'Probe.app/Contents/MacOS/../Frameworks' probe-ffmpeg.txt
           "$RUNNER_TEMP/probe" keychain
           if security find-generic-password -s larpercord-ci-test >/dev/null 2>&1; then exit 1; fi
