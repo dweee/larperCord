@@ -2658,6 +2658,11 @@ pub const App = struct {
         return &app.th_custom;
     }
 
+    fn pumpPortals(app: *App) bool {
+        if (app.opts.qa or app.opts.shot != null) return false;
+        return voz_audio.pumpPortal(&app.st.settings, app.opts.stats, app.win.wake_type);
+    }
+
     fn setThemeColor(app: *App, slot: u8, rgba: ?u32) void {
         const name = app.themes.name();
         if (rgba) |v| {
@@ -2973,6 +2978,7 @@ pub const App = struct {
                 _ = c.SDL_HideWindow(app.win.window);
                 break;
             }
+            if (app.pumpPortals()) pending = 3;
             var e: c.SDL_Event = undefined;
             // O relógio do sistema andou para trás: sem isso, o quadro adiado
             // só viria quando ele alcançasse a hora antiga.
@@ -2999,7 +3005,8 @@ pub const App = struct {
             // O tempo das calls (ui/voice_timer.zig) marca a virada do segundo ou do
             // minuto no relógio: até lá, um sono só.
             const t_wait = now();
-            const nap = anim.napFor(if (due == std.math.maxInt(i64)) null else due -| t_wait, if (anim.clock_wake_ms == std.math.maxInt(i64)) null else anim.clock_wake_ms -| t_wait);
+            var nap = anim.napFor(if (due == std.math.maxInt(i64)) null else due -| t_wait, if (anim.clock_wake_ms == std.math.maxInt(i64)) null else anim.clock_wake_ms -| t_wait);
+            if (voz_audio.portalWaiting()) nap = @min(nap orelse 250, 250);
             due = @min(due, anim.clock_wake_ms);
             const wait = due -| t_wait;
             var got = if (busy or wait <= 0)
@@ -3060,6 +3067,11 @@ pub const App = struct {
                             }
                         },
                         .media => bg_dirty = true,
+                        .portal => if (app.pumpPortals()) {
+                            pending = 3;
+                        } else {
+                            tick_seen = true;
+                        },
                         .token => {
                             timeline.mark(.token_fim);
                             app_accounts.finishStartupLookup(app);
@@ -3594,7 +3606,7 @@ pub const App = struct {
                         wl.pending = @max(wl.pending, 2);
                     },
                     .quit => return false,
-                    .theme, .token, .show, .toggle, .tray_gone, .mascot => {},
+                    .theme, .token, .show, .toggle, .tray_gone, .mascot, .portal => {},
                 }
                 continue;
             }
