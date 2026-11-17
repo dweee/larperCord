@@ -236,11 +236,14 @@ fn assetUrl(buf: []u8, name: []const u8) ![:0]const u8 {
 /// atualiza, e trocar o arquivo daqui daria errado de qualquer jeito.
 pub fn managedBySystem() bool {
     if (sys.windows) return false;
+    // Não há versão publicada para macOS: a troca instalaria o binário do Linux.
+    if (sys.macos) return true;
     const base = c.SDL_GetBasePath() orelse return false;
     return c.access(base, c.W_OK) != 0;
 }
 
 fn runInstall() !void {
+    if (sys.macos) return error.ReadOnly;
     var sb: [1024]u8 = undefined;
     const exe = selfPath(&sb) orelse return error.Disk;
     var ub: [1024]u8 = undefined;

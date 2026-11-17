@@ -153,6 +153,10 @@ fn chaveiro() void {
         for (0..count) |i| _ = c.CredDeleteA(list[i].*.TargetName, list[i].*.Type, 0);
         return;
     }
+    if (sys.macos) {
+        if (qa_mode) return std.log.info("apagar: no QA o Chaveiro fica (larpercord-account)", .{});
+        return sys.keychainDelete("larpercord-account", null);
+    }
     // Uma entrada por conta, e a de antes das várias contas (net/accounts_store.zig).
     const cmds = [_][:0]const u8{
         "secret-tool clear service larpercord-account 2>/dev/null",

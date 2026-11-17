@@ -25,14 +25,21 @@
 #include <fontconfig/fontconfig.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#ifndef __EMSCRIPTEN__
+#if defined(__APPLE__)
+/* macOS: kqueue em vez de inotify, e o caminho do executável e a memória pelo Mach. */
+#include <sys/event.h>
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#elif !defined(__EMSCRIPTEN__)
 #include <sys/inotify.h>
 #endif
 #include <sys/file.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <arpa/inet.h>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <poll.h>
 #include <signal.h>
 #endif
