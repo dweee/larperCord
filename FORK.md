@@ -16,10 +16,10 @@ an old base) that is useful reference for Darwin work.
 
 | Output | What it is |
 |---|---|
-| `packages.{x86_64,aarch64}-linux.larpercord` | Native Linux client, built from source with nixpkgs Zig 0.17, SDL3, curl, OpenSSL |
+| `packages.{x86_64,aarch64}-linux.larpercord` | Native Linux client, built from source with nixpkgs Zig 0.17, SDL3, curl (with WebSocket), OpenSSL |
 | `packages.x86_64-linux.larpercord-windows` | Windows x86_64 build cross-compiled by Zig (`bin/larpercord.exe`, its three DLLs, and a portable zip) |
 | `overlays.default` | Adds `pkgs.larpercord` |
-| `nixosModules.default` | `programs.larpercord`: the package, a Secret Service keyring and emoji/CJK fonts |
+| `nixosModules.default` | `programs.larpercord`: the package, emoji/CJK fonts, and an opt-in GNOME Keyring (`keyring.enable`) for desktops without a Secret Service provider |
 | `homeModules.default` | `programs.larpercord`: package, declarative themes and Lua plugins, `tokenFile`, autostart |
 | `checks.<linux>.*` | Package build (runs `zig build test`), an offscreen frame of the demo, both module evaluations |
 | `tests.x86_64-linux.nixos-vm` | NixOS VM test: the module on a booted system, a frame drawn as a normal user (needs KVM) |
@@ -70,6 +70,9 @@ Home Manager:
   does not use `standardOptimizeOption`, so the Zig hook's default flags are
   off and the package passes `-Dcpu=baseline -Doptimize=fast`. RNNoise still
   picks AVX/AVX2 at run time, as in the upstream release.
+- libcurl is built with `websocketSupport`: the gateway and voice use
+  `curl_ws_*`, and nixpkgs leaves WebSocket off. The `websocket` check runs
+  upstream's `--tls-check` and requires `WebSocket: true`.
 - Runtime helpers that upstream calls by name are on the wrapper's `PATH`:
   `secret-tool` (keyring), `notify-send`, `xdg-open`. Libraries it opens with
   `SDL_LoadObject` (`libdbus-1`, `libwayland-client`, FFmpeg for inline video)
