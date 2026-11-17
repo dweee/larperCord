@@ -1,0 +1,4 @@
+{
+  "x86_64-linux": ["larpercord", "larpercord-windows"],
+  "aarch64-linux": ["larpercord"]
+}
