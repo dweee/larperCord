@@ -1,8 +1,8 @@
 //! Aperte para falar com outra janela em foco. No Windows a thread de voz lê a
 //! tecla com o GetAsyncKeyState a cada quadro de 20 ms da call: sem gancho de
 //! teclado (é o que antivírus e anti-cheat procuram), sem administrador, e o
-//! outro programa continua recebendo a tecla. No Linux, por enquanto, só com a
-//! janela em foco (os eventos do SDL, em net/voz_audio.zig).
+//! outro programa continua recebendo a tecla. No Wayland, o portal entrega os
+//! eventos (ptt_portal.zig).
 const builtin = @import("builtin");
 const voz = @import("../core/voz.zig");
 

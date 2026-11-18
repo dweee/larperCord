@@ -438,7 +438,9 @@ fn pushToTalk(p: anytype, key: *S.Text) void {
         d.text(p.dl, p.font(.regular), 13, r.right() - 12 - d.width(p.font(.regular), 13, hint), d.centerY(r, 13), ctx.col(.faint), hint);
     }
     p.y += 50;
-    if (!ptt_global.supported) {
+    if (voz_audio.portalBound()) {
+        p.note(i18n.tr("O atalho global também funciona com outra janela em foco.", "The global shortcut also works while another window is focused."));
+    } else if (!ptt_global.supported) {
         p.note(i18n.tr("Só funciona com a janela do larperCord em foco: fora dela o programa não vê a tecla.", "Only works while the larperCord window is focused: outside it the app can't see the key."));
     } else if (binding != .none and !capturing) {
         // No Windows, só as teclas que dá para ler de fora (platform/ptt_global.zig).

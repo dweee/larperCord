@@ -11,6 +11,8 @@ test {
     _ = @import("core/gif_favorites.zig");
     _ = @import("core/gif_quadros.zig");
     _ = @import("core/entrada.zig");
+    _ = @import("core/atalho_portal.zig");
+    _ = @import("platform/accent_portal.zig");
     _ = @import("platform/debug_log.zig");
     _ = @import("platform/ffmpeg_busca.zig");
     _ = @import("core/types.zig");

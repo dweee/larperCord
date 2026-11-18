@@ -3,6 +3,8 @@
 //! tema ou o tique do relógio/RAM; parado, a CPU fica em 0%.
 const std = @import("std");
 const sys = @import("platform/sys.zig");
+const linux = @import("builtin").os.tag == .linux;
+const accent_portal = if (linux) @import("platform/accent_portal.zig") else struct {};
 const c = @import("c");
 const platform = @import("platform/window.zig");
 const timeline = @import("platform/timeline.zig");
@@ -213,6 +215,7 @@ pub const App = struct {
     profiles_gen: u32 = 0,
     /// Cópia do tema com a cor de destaque e os cantos das configurações.
     th_custom: @import("theme/theme.zig").Theme = undefined,
+    desktop_accent: if (linux) accent_portal.Settings else void = if (linux) .{} else {},
     /// Cores escolhidas por tema e por modo (persistidas em settings.kdl).
     theme_colors: std.StringHashMapUnmanaged(custom.ThemeOverrides) = .empty,
     /// notify-send em andamento (recolhidos quando terminam).
@@ -597,6 +600,7 @@ pub const App = struct {
         // Primeiro: mesmo com um servidor travado, o filho morre antes do vigia de main.zig.
         lsp_net.shutdown();
         voz_audio.shutdown();
+        if (comptime linux) app.desktop_accent.close();
         _ = c.SDL_RemoveTimer(app.timer);
         // O painel aberto agora volta aberto na próxima vez.
         if (keep) plugin_host.savePrefs();
@@ -1048,7 +1052,7 @@ pub const App = struct {
         style.*.ScrollbarSize = 6;
         style.*.ScrollbarRounding = 3;
         style.*.FontSizeBase = th.font_size;
-        app.applyImGuiColors(th);
+        app.applyImGuiColors(if (linux and app.st.settings.accent == system_accent) app.customTheme() else th);
 
         // Fontes do tema (carregadas sob demanda e reaproveitadas). Sem fonte nenhuma no
         // sistema, a embutida entra aqui, fora do quadro, antes de `uiFamily` pedir.
@@ -2628,6 +2632,8 @@ pub const App = struct {
     /// Paleta de destaque das configurações (índice 1..8).
     pub const accents = [_]u32{ 0x5865F2, 0x3BA55C, 0xF0B232, 0xED4245, 0xEB459E, 0x9B59B6, 0x1ABC9C, 0xE67E22 };
 
+    pub const system_accent: u8 = accents.len + 1;
+
     /// O tema do quadro: o atual, ou uma cópia com a cor de destaque e os
     /// cantos escolhidos nas configurações (vale para todos os temas).
     pub fn customTheme(app: *App) *const theme_mod.Theme {
@@ -2636,10 +2642,15 @@ pub const App = struct {
         const ovs = app.theme_colors.getPtr(app.themes.name());
         const has_colors = if (ovs) |o| o.atConst(app.themes.mode).any() else false;
         const gcol = guild_color.get(app.st.guild);
-        if (set.accent == 0 and set.corners == 0 and !has_colors and gcol == null) return base;
+        const accent: ?d.Rgba = if (linux and set.accent == system_accent)
+            app.desktop_accent.color
+        else if (set.accent > 0 and set.accent <= accents.len)
+            d.Rgba.hex(accents[set.accent - 1])
+        else
+            null;
+        if (accent == null and set.corners == 0 and !has_colors and gcol == null) return base;
         app.th_custom = base.*;
-        if (set.accent > 0 and set.accent <= accents.len) {
-            const col = d.Rgba.hex(accents[set.accent - 1]);
+        if (accent) |col| {
             app.th_custom.colors.set(.accent, col);
             // Texto em cima do destaque: preto ou branco, o que contrastar mais.
             const lum = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
@@ -2656,6 +2667,25 @@ pub const App = struct {
         // A cor do servidor aberto vale por cima de tudo (é a escolha mais específica).
         if (gcol) |rgb| guild_color.apply(&app.th_custom, rgb);
         return &app.th_custom;
+    }
+
+    fn pumpPortals(app: *App) bool {
+        if (app.opts.qa or app.opts.shot != null) return false;
+        const shortcut_changed = voz_audio.pumpPortal(&app.st.settings, app.opts.stats, app.win.wake_type);
+        if (comptime linux) {
+            if (app.desktop_accent.pump(app.st.settings.accent == system_accent, app.win.wake_type)) {
+                app.applyImGuiColors(app.customTheme());
+                app.st.theme_gen +%= 1;
+                app.gate.redraw();
+                if (app.opts.stats) {
+                    if (app.desktop_accent.color) |rgb| {
+                        std.log.info("portal: accent-color ({d:.3}, {d:.3}, {d:.3})", .{ rgb.r, rgb.g, rgb.b });
+                    } else std.log.info("portal: cor de destaque do tema", .{});
+                }
+                return true;
+            }
+        }
+        return shortcut_changed;
     }
 
     fn setThemeColor(app: *App, slot: u8, rgba: ?u32) void {
@@ -2973,6 +3003,7 @@ pub const App = struct {
                 _ = c.SDL_HideWindow(app.win.window);
                 break;
             }
+            if (app.pumpPortals()) pending = 3;
             var e: c.SDL_Event = undefined;
             // O relógio do sistema andou para trás: sem isso, o quadro adiado
             // só viria quando ele alcançasse a hora antiga.
@@ -2999,7 +3030,8 @@ pub const App = struct {
             // O tempo das calls (ui/voice_timer.zig) marca a virada do segundo ou do
             // minuto no relógio: até lá, um sono só.
             const t_wait = now();
-            const nap = anim.napFor(if (due == std.math.maxInt(i64)) null else due -| t_wait, if (anim.clock_wake_ms == std.math.maxInt(i64)) null else anim.clock_wake_ms -| t_wait);
+            var nap = anim.napFor(if (due == std.math.maxInt(i64)) null else due -| t_wait, if (anim.clock_wake_ms == std.math.maxInt(i64)) null else anim.clock_wake_ms -| t_wait);
+            if (voz_audio.portalWaiting()) nap = @min(nap orelse 250, 250);
             due = @min(due, anim.clock_wake_ms);
             const wait = due -| t_wait;
             var got = if (busy or wait <= 0)
@@ -3060,6 +3092,11 @@ pub const App = struct {
                             }
                         },
                         .media => bg_dirty = true,
+                        .portal => if (app.pumpPortals()) {
+                            pending = 3;
+                        } else {
+                            tick_seen = true;
+                        },
                         .token => {
                             timeline.mark(.token_fim);
                             app_accounts.finishStartupLookup(app);
@@ -3594,7 +3631,7 @@ pub const App = struct {
                         wl.pending = @max(wl.pending, 2);
                     },
                     .quit => return false,
-                    .theme, .token, .show, .toggle, .tray_gone, .mascot => {},
+                    .theme, .token, .show, .toggle, .tray_gone, .mascot, .portal => {},
                 }
                 continue;
             }
