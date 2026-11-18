@@ -6,6 +6,8 @@ const builtin = @import("builtin");
 const sys = @import("sys.zig");
 const c = @import("c");
 
+pub const app_id = "dev.larpercord";
+
 pub const Wake = enum(i32) {
     gateway = 1,
     theme = 2,
@@ -24,6 +26,7 @@ pub const Wake = enum(i32) {
     tray_gone = 10,
     /// Um arquivo de mascote mudou (ui/mascote_arquivos.zig).
     mascot = 11,
+    portal = 12,
 };
 
 /// O renderizador que abriu (para Configurações → Desempenho) e se o escolhido nas
@@ -49,7 +52,7 @@ pub const Window = struct {
         // composição (ui/ime.zig), o SDL repassa o texto e a lista de candidatos
         // continua nativa.
         _ = c.SDL_SetHint(c.SDL_HINT_IME_IMPLEMENTED_UI, "composition");
-        _ = c.SDL_SetAppMetadata("larperCord", (@import("build_options").version ++ "\x00").ptr, "dev.larpercord");
+        _ = c.SDL_SetAppMetadata("larperCord", (@import("build_options").version ++ "\x00").ptr, app_id);
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
             std.log.err("SDL video: {s}", .{c.SDL_GetError()});
             return error.SdlInit;
