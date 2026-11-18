@@ -23,6 +23,10 @@ const ruido = @import("../core/ruido.zig");
 const S = @import("../ui/settings_state.zig");
 const fsutil = @import("../platform/fsutil.zig");
 const ptt_global = @import("../platform/ptt_global.zig");
+const linux = @import("builtin").os.tag == .linux;
+const ptt_portal = if (linux) @import("../platform/ptt_portal.zig") else struct {};
+const atalho_portal = @import("../core/atalho_portal.zig");
+const i18n = @import("../ui/i18n.zig");
 
 const alloc = std.heap.c_allocator;
 
@@ -211,12 +215,56 @@ pub fn apply(set: *const S.Settings) void {
 
 var capturing = false;
 var captured: ?voz.Binding = null;
+var portal_shortcut: if (linux) ptt_portal.Shortcut else void = if (linux) .{} else {};
+var portal_key: u16 = 0;
+var portal_down: Atomic(bool) = .init(false);
+
+pub fn portalBound() bool {
+    return if (comptime linux) portal_shortcut.bound else false;
+}
+
+/// Mesmo escondida, a janela atende o portal. Não espera a resposta do diálogo.
+pub fn pumpPortal(set: *const S.Settings, stats: bool, wake_type: u32) bool {
+    if (comptime linux) {
+        const was_bound = portal_shortcut.bound;
+        const binding = voz.Binding.parse(set.voice_key.slice());
+        const key = if (set.voice_ptt and binding == .key) binding.key else 0;
+        if (key != portal_key) {
+            portal_key = key;
+            portal_down.store(false, .monotonic);
+            if (key == 0) portal_shortcut.close() else {
+                const driver = c.SDL_GetCurrentVideoDriver();
+                if (driver != null and std.mem.eql(u8, std.mem.span(driver), "wayland")) {
+                    portal_shortcut.start(key, c.SDL_GetTicks(), wake_type);
+                } else portal_shortcut.unavailable();
+            }
+        }
+        if (portal_shortcut.bus != null) {
+            var buf: [16]u8 = undefined;
+            const sym = c.SDL_GetKeyFromScancode(@intCast(key), 0, false);
+            if (atalho_portal.trigger(&buf, key, sym)) |trigger| {
+                portal_shortcut.pump(c.SDL_GetTicks(), trigger, i18n.trZ("Aperte para falar", "Push to talk").ptr);
+            } else portal_shortcut.unavailable();
+        }
+        const down = !capturing and portal_shortcut.down;
+        if (portal_down.swap(down, .monotonic) != down and stats) {
+            std.log.info("voz: GlobalShortcuts ptt={}", .{pttKey()});
+        }
+        return was_bound != portal_shortcut.bound;
+    }
+    return false;
+}
+
+pub fn portalWaiting() bool {
+    return if (comptime linux) portal_shortcut.creating() else false;
+}
 
 pub fn startCapture() void {
     capturing = true;
     captured = null;
     // Escolhendo outro atalho, o de antes não abre o microfone de fora da janela.
     sh.ptt_vk.store(0, .monotonic);
+    if (comptime linux) portal_down.store(false, .monotonic);
 }
 
 pub fn cancelCapture() void {
@@ -286,7 +334,7 @@ fn setPtt(v: ?bool) void {
 /// em foco e, no Windows, também com outra janela em foco.
 pub fn pttKey() bool {
     if (!sh.ptt.load(.monotonic)) return false;
-    return sh.ptt_down.load(.monotonic) or ptt_global.down(sh.ptt_vk.load(.monotonic));
+    return sh.ptt_down.load(.monotonic) or (linux and portal_down.load(.monotonic)) or ptt_global.down(sh.ptt_vk.load(.monotonic));
 }
 
 // --- Dispositivos -----------------------------------------------------------
@@ -677,6 +725,10 @@ const preview_ring_len = 6 * voz.rate * voz.channels;
 
 /// Ao fechar o app, antes do SDL_Quit.
 pub fn shutdown() void {
+    if (comptime linux) {
+        portal_down.store(false, .monotonic);
+        portal_shortcut.close();
+    }
     stop_req.store(true, .release);
     if (thread) |t| c.SDL_WaitThread(t, null);
     thread = null;

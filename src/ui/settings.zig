@@ -941,7 +941,15 @@ fn page(p: *Page, previews: []const Preview) void {
             p.toggle(i18n.tr("Status em anel", "Status ring"), i18n.tr("Online, ausente e não perturbe como um anel em volta da foto.", "Online, idle and do-not-disturb as a ring around the picture."), &s.status_ring);
             p.heading(i18n.tr("Cor de destaque", "Accent color"));
             p.note(i18n.tr("Vale para qualquer tema; \"T\" volta à cor do tema.", "Works with every theme; \"T\" goes back to the theme's color."));
-            p.swatches(&@import("../app.zig").App.accents, &s.accent);
+            const App = @import("../app.zig").App;
+            p.swatches(&App.accents, &s.accent);
+            if (comptime @import("builtin").os.tag == .linux) {
+                var system = s.accent == App.system_accent;
+                p.toggle(i18n.tr("Usar a cor do sistema", "Use system accent color"), i18n.tr("Acompanha a cor de destaque da área de trabalho, quando disponível.", "Follows the desktop accent color when available."), &system);
+                if (system) s.accent = App.system_accent else if (s.accent == App.system_accent) {
+                    s.accent = 0;
+                }
+            }
             p.heading(i18n.tr("Cantos", "Corners"));
             p.segmented(&.{ i18n.tr("Do tema", "Theme"), i18n.tr("Retos", "Square"), i18n.tr("Suaves", "Soft"), i18n.tr("Redondos", "Round") }, &s.corners);
             p.divider();

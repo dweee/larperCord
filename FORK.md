@@ -64,6 +64,8 @@ Home Manager:
 |---|---|
 | `src/platform/sys.zig`, `src/qa_lsp_server.zig` | Ignore SIGPIPE/SIGTERM via `std.posix.sigaction` instead of `c.signal(..., c.SIG_IGN)`: translate-c rejects the `SIG_IGN` cast on aarch64, so upstream did not build for aarch64-linux. |
 | `src/net/discord.zig`, `src/main.zig` | Read `LARPER_TOKEN` once at startup and remove it from the libc and SDL environments, so helpers the app spawns (`notify-send`, `secret-tool`, `xdg-open`) do not inherit the token. The Home Manager `tokenFile` wrapper passes the token this way. |
+| `src/platform/ptt_portal.zig`, `src/net/voz_audio.zig` | Use the Wayland GlobalShortcuts portal for push-to-talk while another window has focus. |
+| `src/platform/accent_portal.zig`, `src/app.zig` | Offer the desktop accent on Linux and follow changes through the Settings portal. |
 
 ## Packaging notes
 
@@ -79,6 +81,10 @@ Home Manager:
   `SDL_LoadObject` (`libdbus-1`, `libwayland-client`, FFmpeg for inline video)
   are on `LD_LIBRARY_PATH`. `withFfmpeg = false` drops FFmpeg; videos then open
   in the browser.
+- The GlobalShortcuts portal resolves the registered app ID through
+  `dev.larpercord.desktop`. Install the package where the desktop can see this
+  launcher to use global push-to-talk. A bare `nix run` can use a launcher
+  already installed in the desktop session.
 - The in-app updater needs no patch. Upstream already detects a read-only
   install directory and shows "Installed by a package manager: update through
   it" instead of installing.
