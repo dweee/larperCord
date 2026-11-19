@@ -10,24 +10,46 @@ let
 
   fontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
 
-  nixosSystem = import "${pkgs.path}/nixos/lib/eval-config.nix" {
-    inherit system;
-    modules = [
-      self.nixosModules.default
-      {
-        programs.larpercord = {
-          enable = true;
-          keyring.enable = true;
-        };
-        boot.loader.grub.enable = false;
-        fileSystems."/" = {
-          device = "none";
-          fsType = "tmpfs";
-        };
-        system.stateVersion = "25.11";
-      }
-    ];
+  # A minimal NixOS system around the module, plus `extra`.
+  mkSystem =
+    extra:
+    import "${pkgs.path}/nixos/lib/eval-config.nix" {
+      inherit system;
+      modules = [
+        self.nixosModules.default
+        {
+          boot.loader.grub.enable = false;
+          fileSystems."/" = {
+            device = "none";
+            fsType = "tmpfs";
+          };
+          system.stateVersion = "25.11";
+        }
+        extra
+      ];
+    };
+
+  nixosSystem = mkSystem {
+    programs.larpercord = {
+      enable = true;
+      keyring.enable = true;
+    };
   };
+  nixosDefault = mkSystem { programs.larpercord.enable = true; };
+  # GNOME Keyring and KWallet would both claim org.freedesktop.secrets.
+  nixosPlasmaKeyring = mkSystem {
+    services.desktopManager.plasma6.enable = true;
+    programs.larpercord = {
+      enable = true;
+      keyring.enable = true;
+    };
+  };
+  nixosPlasma = mkSystem {
+    services.desktopManager.plasma6.enable = true;
+    programs.larpercord.enable = true;
+  };
+  secretServiceWarning = w: lib.hasInfix "org.freedesktop.secrets" w && lib.hasInfix "KWallet" w;
+  hasSecretServiceWarning = sys: lib.any secretServiceWarning sys.config.warnings;
 
   # The built-in terminal theme renamed, with its dark background turned pure
   # magenta so a frame drawn with it is recognisable by its pixels. Plain Nix
@@ -52,22 +74,6 @@ let
     TZ = "UTC";
   };
 
-  nixosDefault = import "${pkgs.path}/nixos/lib/eval-config.nix" {
-    inherit system;
-    modules = [
-      self.nixosModules.default
-      {
-        programs.larpercord.enable = true;
-        boot.loader.grub.enable = false;
-        fileSystems."/" = {
-          device = "none";
-          fsType = "tmpfs";
-        };
-        system.stateVersion = "25.11";
-      }
-    ];
-  };
-
   hmConfig = home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
@@ -89,6 +95,53 @@ let
           plugins.hello = ./checks/hello.lua;
           tokenFile = "/run/agenix/larpercord-token";
           autostart = true;
+        };
+      }
+    ];
+  };
+
+  # A stand-in for the nixGL package set: it only has to be a program that
+  # runs its arguments, which is all the wrapper chain needs.
+  nixGLStub = pkgs.writeShellScriptBin "nixGLIntel" ''exec "$@"'';
+  hmNixGL = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeModules.default
+      {
+        home = {
+          username = "larper";
+          homeDirectory = "/home/larper";
+          stateVersion = "25.11";
+        };
+        targets.genericLinux = {
+          enable = true;
+          gpu.enable = false;
+          nixGL.packages = {
+            nixGLIntel = nixGLStub;
+          };
+        };
+        programs.larpercord = {
+          enable = true;
+          useNixGL = true;
+          tokenFile = "/run/agenix/larpercord-token";
+        };
+      }
+    ];
+  };
+  # useNixGL without a nixGL package set wraps nothing, so it must say so.
+  hmNixGLUnset = home-manager.lib.homeManagerConfiguration {
+    inherit pkgs;
+    modules = [
+      self.homeModules.default
+      {
+        home = {
+          username = "larper";
+          homeDirectory = "/home/larper";
+          stateVersion = "25.11";
+        };
+        programs.larpercord = {
+          enable = true;
+          useNixGL = true;
         };
       }
     ];
@@ -180,6 +233,29 @@ in
         touch $out
       '';
 
+  # Home Manager on a non-NixOS distribution: with `useNixGL` the installed
+  # program starts through the nixGL wrapper (a stub here), which then runs the
+  # token wrapper and the real binary. Without it, nothing is wrapped.
+  home-manager-nixgl =
+    let
+      bin = "${hmNixGL.config.programs.larpercord.finalPackage}/bin/larpercord";
+      plain = hmConfig.config.programs.larpercord.finalPackage;
+      unsetWarned = lib.any (lib.hasInfix "useNixGL") hmNixGLUnset.config.warnings;
+      setWarned = lib.any (lib.hasInfix "useNixGL") hmNixGL.config.warnings;
+    in
+    assert unsetWarned && !setWarned;
+    pkgs.runCommand "larpercord-hm-nixgl" { } ''
+      combined=$(grep -o '/nix/store/[a-z0-9]*-nixGLCombinedWrapper-Intel/bin/nixGLCombinedWrapper-Intel' ${bin} | head -1)
+      test -x "$combined"
+      grep -q ${nixGLStub}/bin/nixGLIntel "$combined"
+      # The chain still reaches the real binary and the desktop entry survives.
+      ${bin} --version | grep -q larperCord
+      test -e ${hmNixGL.config.programs.larpercord.finalPackage}/share/applications/dev.larpercord.desktop
+      # Off by default: the plain package has no nixGL in its launcher.
+      ! grep -q nixGLCombinedWrapper ${plain}/bin/larpercord
+      touch $out
+    '';
+
   # The NixOS module evaluated in a full system, without booting it (release
   # gates build checks without KVM; the VM test is under `tests`).
   nixos-module =
@@ -193,6 +269,13 @@ in
     assert cfg.services.gnome.gnome-keyring.enable;
     # Off by default: another Secret Service provider may already run.
     assert !nixosDefault.config.services.gnome.gnome-keyring.enable;
+    # Plasma plus the GNOME Keyring option warns about the two Secret Service
+    # providers; either alone, or Plasma without the option, does not. Eval
+    # only: nothing here builds a derivation.
+    assert hasSecretServiceWarning nixosPlasmaKeyring;
+    assert !hasSecretServiceWarning nixosSystem;
+    assert !hasSecretServiceWarning nixosDefault;
+    assert !hasSecretServiceWarning nixosPlasma;
     pkgs.writeText "larpercord-nixos-module" (builtins.toJSON { inherit names fonts; });
 }
 // lib.optionalAttrs (system == "x86_64-linux") {

@@ -45,7 +45,7 @@ let
     exec ${lib.getExe cfg.package} "$@"
   '';
 
-  finalPackage =
+  withToken =
     if cfg.tokenFile == null then
       cfg.package
     else
@@ -59,6 +59,13 @@ let
           mainProgram = "larpercord";
         };
       };
+
+  # Home Manager's own nixGL wrapper (targets.genericLinux.nixGL). It is the
+  # identity function until `targets.genericLinux.nixGL.packages` is set, and
+  # `or` keeps older Home Manager releases without it evaluating.
+  nixGLWrap = config.lib.nixGL.wrap or lib.id;
+
+  finalPackage = if cfg.useNixGL then nixGLWrap withToken else withToken;
 in
 {
   options.programs.larpercord = {
@@ -75,7 +82,24 @@ in
       type = types.package;
       readOnly = true;
       default = finalPackage;
-      description = "The installed package, including the token wrapper when `tokenFile` is set.";
+      description = "The installed package, including the token wrapper when `tokenFile` is set and the nixGL wrapper when `useNixGL` is.";
+    };
+
+    useNixGL = mkOption {
+      type = types.bool;
+      default = false;
+      example = true;
+      description = ''
+        Run larperCord through Home Manager's nixGL wrapper
+        (`config.lib.nixGL.wrap`), for a Home Manager install on a distribution
+        other than NixOS. A Nix-built larperCord cannot load the host's GPU
+        driver by itself: on a Wayland session it fails to start with no
+        renderer (SDL3's Wayland backend has no GPU-less path). Needs
+        `targets.genericLinux.nixGL.packages` to be set; the wrapper does nothing
+        without it, so that case warns. As an alternative that needs no wrapper,
+        enable `targets.genericLinux.gpu` and run its setup script once.
+        Leave it off on NixOS.
+      '';
     };
 
     themes = mkOption {
@@ -137,6 +161,14 @@ in
             message = "programs.larpercord.tokenFile must not point into the Nix store.";
           }
         ];
+
+        warnings =
+          lib.optional (cfg.useNixGL && (config.targets.genericLinux.nixGL.packages or null) == null)
+            ''
+              programs.larpercord.useNixGL is set, but targets.genericLinux.nixGL.packages is
+              null, so larperCord is not wrapped. Set it to the nixGL package set, or turn on
+              targets.genericLinux.gpu instead.
+            '';
 
         home.packages = [ cfg.finalPackage ];
 
