@@ -2,7 +2,7 @@
   description = "larperCord: a native Discord client in Zig (Nix packaging fork)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/04906337b6d53e8bb0eaf0470ae9f070a4d4eb55";
+    nixpkgs.url = "github:NixOS/nixpkgs/0bb8272318b4ca41bf0edc6224df3e3e3046b70d";
     # Only used by the module checks; consumers do not need it.
     home-manager = {
       url = "github:nix-community/home-manager/2b13c9cb3aa20653e6f8ee0b7f8331a53ea9b0a9";
