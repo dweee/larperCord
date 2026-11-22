@@ -197,6 +197,10 @@ jobs:
           security unlock-keychain -p "$kcpass" "$kc"
           security import "$tmp/cs.p12" -k "$kc" -P "$pass" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" > /dev/null
+          # codesign looks for the identity's key in the search list only.
+          old_list=$(security list-keychains -d user | tr -d '"')
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s "$kc" $old_list
           rm -rf "$tmp"
           security find-identity -p codesigning "$kc" | grep -F 'larperCord CI Code Signing'
 
@@ -205,12 +209,14 @@ jobs:
           # codesign: give up after a minute instead.
           ./hm-installer
           app="$HOME/Applications/larperCord.app"
-          perl -e 'alarm 60; exec @ARGV' codesign --force --keychain "$kc" --sign 'larperCord CI Code Signing' \
+          perl -e 'alarm 60; exec @ARGV' codesign --force --sign 'larperCord CI Code Signing' \
             --identifier dev.larpercord --timestamp=none "$app"
           codesign --verify --verbose "$app"
           codesign -d -r- "$app" 2>&1 | tee codesign.txt
           grep -q 'identifier "dev.larpercord"' codesign.txt
           grep -q 'certificate leaf' codesign.txt
+          # shellcheck disable=SC2086
+          security list-keychains -d user -s $old_list
           security delete-keychain "$kc"
 
           printf 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token' > /tmp/larpercord-check-token
