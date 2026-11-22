@@ -2,7 +2,7 @@
 
 Upstream: https://github.com/RshaCuDeVidro/larperCord (GPL-3.0-only)
 
-Base: upstream release `v0.6.6` (`9624c551988557aefce292e53c30583357c9dda6`).
+Base: upstream release `v0.6.7` (`7f2814a982fa4ab8f1e8e85ea157d266d58161c3`).
 Upstream history and authorship are kept. The fork adds Nix packaging,
 modules and CI, plus the small, upstreamable source fixes listed under
 [Source patches](#source-patches).
