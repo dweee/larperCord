@@ -221,7 +221,10 @@ jobs:
 
           printf 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token' > /tmp/larpercord-check-token
           chmod 600 /tmp/larpercord-check-token
-          plist="$PWD/hm-activation/LaunchAgents/dev.larpercord.plist"
+          # The check configuration's home is /Users/larper; this runner's is not.
+          plist="$RUNNER_TEMP/dev.larpercord.plist"
+          sed "s|/Users/larper/|$HOME/|g" "$PWD/hm-activation/LaunchAgents/dev.larpercord.plist" > "$plist"
+          grep -qF "$app</string>" "$plist"
           plutil -lint "$plist"
           started=$(date '+%Y-%m-%d %H:%M:%S')
           launchctl bootstrap "gui/$(id -u)" "$plist"
