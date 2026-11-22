@@ -1,9 +1,8 @@
 {
-  "branch": "9624c551988557aefce292e53c30583357c9dda6",
   "release": {
-    "id": 444963383,
-    "sha": "9624c551988557aefce292e53c30583357c9dda6",
-    "tag": "v0.6.6"
+    "id": 450808089,
+    "sha": "7f2814a982fa4ab8f1e8e85ea157d266d58161c3",
+    "tag": "v0.6.7"
   },
   "track": "release",
   "upstream": "RshaCuDeVidro/larperCord",
