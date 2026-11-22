@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/2786a2a72088ecf32aea5b3ec52099e6a7cff78f";
     # Only used by the module checks; consumers do not need it.
     home-manager = {
-      url = "github:nix-community/home-manager/6857c7f7c338ad181729c52071386b0d3afa24bc";
+      url = "github:nix-community/home-manager/a76d555f12c54e97364a676f83e703199c8fbe5b";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
