@@ -1,0 +1,147 @@
+// tokyo-night.kdl: Neon lights over a quiet, rainy Tokyo skyline
+// Made in the larperCord theme builder, starting from orbital.
+// https://rshacudevidro.github.io/larperCord/theme-builder.html
+theme "Tokyo Night" description="Luzes de neon sobre um horizonte tranquilo e chuvoso de Tóquio. Cores do Tokyo Night, de enkia (MIT)." description-en="Neon lights over a quiet, rainy Tokyo skyline. Colors from Tokyo Night by enkia (MIT)." author="mealet" license="MIT" preview=glass
+palette "#15161e" "#f7768e" "#9ece6a" "#e0af68" "#7aa2f7" "#bb9af7" "#7dcfff" "#a9b1d6" "#414868" "#ff899d" "#9fe044" "#faba4a" "#8db0ff" "#c7a9ff" "#a4daff" "#c0caf5"
+
+colors mode=dark {
+    bg              "#1a1b26"
+    rail            "#13141c"
+    sidebar         "#16161e"
+    surface         "#1f2335"
+    elevated        "#292e42"
+    overlay         "#343a55"
+    text            "#c0caf5"
+    muted           "#9aa5ce"
+    faint           "#565f89"
+    accent          "#7aa2f7"
+    accent-text     "#16161e"
+    border          "#3b4261"
+    hover           "#1e2132"
+    selected        "#2e3c64"
+    online          "#9ece6a"
+    idle            "#e0af68"
+    dnd             "#f7768e"
+    danger          "#f7768e"
+    mention         "#e0af68"
+    link            "#7dcfff"
+    code-bg         "#16161e"
+    bubble-self     "#2f3d6b"
+    bubble-self-text "#c0caf5"
+    bubble-other    "#292e42"
+    shadow          "#0a0b1099"
+}
+roles mode=dark "#f7768e" "#ff9e64" "#e0af68" "#9ece6a" "#73daca" "#7dcfff" "#7aa2f7" "#bb9af7"
+
+colors mode=light {
+    bg              "#e1e2e7"
+    rail            "#d6d8e0"
+    sidebar         "#dcdee5"
+    surface         "#e9eaf0"
+    elevated        "#f0f1f6"
+    overlay         "#f6f7fa"
+    text            "#2e3a6b"
+    muted           "#5a6491"
+    faint           "#6b7399"
+    accent          "#2e5fc7"
+    accent-text     "#ffffff"
+    border          "#c4c8da"
+    hover           "#d9dbe5"
+    selected        "#c4c8da"
+    online          "#3f6b1f"
+    idle            "#7a5a00"
+    dnd             "#c4143f"
+    danger          "#c4143f"
+    mention         "#7a5a00"
+    link            "#0a5f85"
+    code-bg         "#dfe0e8"
+    bubble-self     "#a9bbf0"
+    bubble-self-text "#1a2250"
+    bubble-other    "#f0f1f6"
+    shadow          "#00000024"
+}
+roles mode=light "#c4143f" "#a04a00" "#7a5a00" "#3f6b1f" "#0b6e5e" "#0a5f85" "#2e5fc7" "#7a3fc9"
+
+fonts ui="Inter" mono="JetBrains Mono" size=13.5
+metrics radius=9
+window transparent=#true
+
+options {
+    option "estrelas" label="Campo de estrelas" description="Estrelas paradas atrás dos painéis (geradas uma vez, não gastam nada)." label-en="Starfield" description-en="Still stars behind the panels (generated once, costs nothing)." default=#true
+    option "orbitas" label="Sistema de órbitas" description="O diagrama de órbitas ao fundo." label-en="Orbit system" description-en="The orbit diagram in the background." default=#true
+    option "movimento" label="Fundo em movimento" description="Estrelas e luas andam bem devagar, a 10 quadros por segundo. Desliga sozinho com \"Reduzir movimento\" e com a janela em segundo plano." label-en="Moving background" description-en="Stars and moons drift very slowly, at 10 frames per second. Turns itself off with \"Reduce motion\" and when the window is in the background." default=#false
+    option "telemetria" label="Telemetria no topo" description="Conexão, ping, RAM e relógio na barra superior." label-en="Top telemetry" description-en="Connection, ping, RAM and clock in the top bar." default=#true
+    option "abas" label="Abas de canal" description="Canais abertos em abas acima da conversa." label-en="Channel tabs" description-en="Open channels as tabs above the conversation." default=#true
+    option "topo" label="Barra de busca" description="Mostra a barra de busca e ajuda abaixo do wordmark (Ctrl+K continua funcionando)." label-en="Search bar" description-en="Shows the search/help bar below the wordmark (Ctrl+K still works)." default=#false
+    option "crt" label="Scanlines do console" description="Um leve efeito de tela de nave por cima de tudo." label-en="Console scanlines" description-en="A subtle ship-screen effect over everything." default=#false
+}
+
+styles {
+    // Painel de vidro fumê: o fundo passa um pouco, o texto não perde contraste.
+    style "panel" radius=10 gradient="alpha(mix(@surface, @accent, 0.05), 0.90) alpha(@surface, 0.76)" border-gradient="alpha(@accent, 0.60) alpha(@border, 0.9) alpha(@border, 0.45)" border-gradient-angle=70 inner-shadow="alpha(@accent, 0.035)" inner-shadow-size=18 hover-bg="alpha(@accent, 0.012)" drop-shadow="@shadow" drop-shadow-size=20 drop-shadow-y=4
+}
+
+layout {
+    stack gradient="mix(@bg, @accent, 0.08) @bg @rail" gradient-angle=120 {
+        starfield when=estrelas color="alpha(@muted, 0.75)" color2="alpha(@accent, 0.8)" density=1.1 motion="$movimento"
+        orbit when=orbitas center-x=0.73 center-y=0.40 rings=7 color="alpha(@accent, 0.42)" color2=accent motion="$movimento"
+        column vignette="alpha(@shadow, 0.9)" vignette-size=0.5 {
+            row height=46 gradient="alpha(@rail, 0.66) alpha(@rail, 0.30)" padding-x=16 gap=10 border-bottom="alpha(@accent, 0.38)" {
+                stack width=28 {
+                    shape kind=ring size=22 thickness=1 color="alpha(@accent, 0.35)"
+                    shape kind=arc size=22 thickness=1.6 start=-150 sweep=250 color=accent dot="@text" dot-size=2.4
+                    shape kind=circle size=6 color=accent
+                }
+                label width=210 text="ORBITAL" tracking=8 size=15 weight=bold font=mono text-gradient="@text @accent" text-gradient-angle=0 shadow="alpha(@accent, 0.30)" shadow-blur=2
+                status-bar flex=1 variant=plain when=telemetria items="conn ping ram spacer clock"
+                spacer flex=1 unless=telemetria
+            }
+            topbar height=32 gradient="alpha(@rail, 0.66) alpha(@rail, 0.30)" when=topo
+            row flex=1 padding=14 gap=14 {
+                column width=260 style=panel {
+                    label height=38 size=9 color=muted font=mono span-gap=9 {
+                        span "01" size=18 color=accent
+                        span "CANAIS" en="CHANNELS" tracking=3
+                    }
+                    rule height=1 kind=dashed dash=3 gap=3 color="alpha(@accent, 0.45)"
+                    channel-list flex=1 variant=discord inset-x=4 font=mono
+                    rule height=1 inset-x=12 color=border
+                    user-panel height=52 variant=tty inset-x=4
+                }
+                column flex=1 style=panel {
+                    label height=38 size=9 color=muted font=mono span-gap=9 {
+                        span "02" size=18 color=accent
+                        span "CANAL" en="CHANNEL" tracking=3
+                    }
+                    rule height=1 kind=dashed dash=3 gap=3 color="alpha(@accent, 0.45)"
+                    spacer height=6
+                    header height=44 variant=minimal inset-x=18
+                    tabs height=40 variant=underline when=abas font=mono
+                    messages flex=1 variant=cozy avatar=square avatar-size=26 spacing=12 call-style=panel call-tint=0.12
+                    column height=84 padding-x=18 {
+                        spacer flex=1
+                        composer height=44 variant=prompt
+                        spacer height=14
+                    }
+                }
+                column width=220 style=panel hide-below=1120 {
+                    label height=38 size=9 color=muted font=mono span-gap=9 {
+                        span "03" size=18 color=accent
+                        span "TRIPULAÇÃO" en="CREW" tracking=3
+                    }
+                    rule height=1 kind=dashed dash=3 gap=3 color="alpha(@accent, 0.45)"
+                    member-list flex=1 variant=tty inset-y=4 font=mono
+                }
+            }
+            row height=58 gradient="alpha(@rail, 0.30) alpha(@rail, 0.70)" padding-x=16 gap=14 border-top="alpha(@accent, 0.38)" {
+                label width=142 size=9 color=muted font=mono span-gap=9 {
+                    span "04" size=18 color=accent
+                    span "SERVIDORES" en="SERVERS" tracking=2
+                }
+                guild-bar flex=1 orientation=horizontal variant=bar shape=squircle size=28 icon-style=outline labels=#false indicators=#false
+                label width=86 text="DECK 07" tracking=2 size=9 color=muted align=right font=mono
+            }
+        }
+        crt when=crt spacing=3 strength=0.04
+    }
+}
