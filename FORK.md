@@ -91,7 +91,9 @@ programs.larpercord.macos.codeSign.command =
 
 TCC then keys the grant to the certificate and `dev.larpercord`, not to the
 ad-hoc signature of each build. Without a command the copy keeps the linker's
-ad-hoc signatures and macOS asks again after updates.
+ad-hoc signatures and macOS asks again after updates. The first signing with a
+new identity asks once whether `codesign` may use its key: choose "Always
+Allow", or activation waits on the dialog.
 
 ## Source patches
 
@@ -238,7 +240,8 @@ Leave it off on NixOS.
   `sys.zig`/`ffmpeg.zig`: a Keychain round trip under a test service (deleted
   afterwards), FFmpeg loaded from a bundle's `Contents/Frameworks`, and
   `SDL_OpenURL`. It also installs the Home Manager copy, signs it with a
-  throwaway self-signed identity made the way `monke-tcc-sign` makes its own,
+  throwaway self-signed identity made the way `monke-tcc-sign` makes its own
+  (in a temporary keychain whose partition list stands in for "Always Allow"),
   checks the signature carries `certificate leaf` and `dev.larpercord`, and
   starts it from the launchd agent with `LARPER_TOKEN_FILE`.
 - `upstream-sync.yml` calls the pinned dave-fork-ci controller. It tracks

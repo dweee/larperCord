@@ -178,8 +178,10 @@ jobs:
       - name: Install the Home Manager copy, sign it like monke-tcc-sign, start it from the launchd agent
         timeout-minutes: 8
         run: |
-          # A self-signed code-signing identity in the login Keychain, made the way
-          # flakey's monke-tcc-sign makes "rotna Code Signing".
+          # A self-signed code-signing identity made the way flakey's
+          # monke-tcc-sign makes "rotna Code Signing", in a throwaway keychain:
+          # on a desktop the first codesign asks to use the key ("Always Allow"),
+          # which nobody can answer here, so the partition list grants it up front.
           tmp=$(mktemp -d)
           printf '%s\n' '[req]' 'distinguished_name = dn' 'x509_extensions = v3' 'prompt = no' \
             '[dn]' 'CN = larperCord CI Code Signing' '[v3]' 'basicConstraints = CA:false' \
@@ -188,20 +190,28 @@ jobs:
           pass=$(uuidgen)
           /usr/bin/openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -out "$tmp/cs.p12" \
             -passout "pass:$pass" -name 'larperCord CI Code Signing'
-          security import "$tmp/cs.p12" -k "$HOME/Library/Keychains/login.keychain-db" -P "$pass" \
-            -T /usr/bin/codesign -T /usr/bin/security
+          kc="$RUNNER_TEMP/larpercord-ci.keychain-db"
+          kcpass=$(uuidgen)
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 3600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$tmp/cs.p12" -k "$kc" -P "$pass" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" > /dev/null
           rm -rf "$tmp"
-          security find-identity -p codesigning | grep -F 'larperCord CI Code Signing'
+          security find-identity -p codesigning "$kc" | grep -F 'larperCord CI Code Signing'
 
           # What activation does (the check config's signer only records the call),
-          # then the real signature on the installed copy.
+          # then the real signature on the installed copy. A prompt would hang
+          # codesign: give up after a minute instead.
           ./hm-installer
           app="$HOME/Applications/larperCord.app"
-          codesign --force --sign 'larperCord CI Code Signing' --identifier dev.larpercord --timestamp=none "$app"
+          perl -e 'alarm 60; exec @ARGV' codesign --force --keychain "$kc" --sign 'larperCord CI Code Signing' \
+            --identifier dev.larpercord --timestamp=none "$app"
           codesign --verify --verbose "$app"
           codesign -d -r- "$app" 2>&1 | tee codesign.txt
           grep -q 'identifier "dev.larpercord"' codesign.txt
           grep -q 'certificate leaf' codesign.txt
+          security delete-keychain "$kc"
 
           printf 'MTIzNDU2Nzg5MDEyMzQ1Njc4OTA.ci-token.not_a_real_token' > /tmp/larpercord-check-token
           chmod 600 /tmp/larpercord-check-token
