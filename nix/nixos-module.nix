@@ -7,6 +7,8 @@ self:
 }:
 let
   cfg = config.programs.larpercord;
+  # `or false` so evaluation never fails where the option does not exist.
+  plasma6 = config.services.desktopManager.plasma6.enable or false;
   inherit (lib)
     mkEnableOption
     mkIf
@@ -32,9 +34,11 @@ in
       description = ''
         Enable GNOME Keyring as the Secret Service provider, so "Remember"
         stores tokens in the keyring through `secret-tool`. Leave it off when
-        the desktop already provides one (GNOME, KDE Plasma's KWallet,
-        KeePassXC, pass-secret-service). Without any provider the app keeps
-        tokens in `~/.config/larpercord/tokens/<ID>` with mode 600.
+        the desktop already provides one: GNOME, KDE Plasma (KWallet answers
+        `org.freedesktop.secrets` itself; GNOME Keyring would compete with it
+        for that name), KeePassXC, pass-secret-service. Without any provider
+        the app keeps tokens in `~/.config/larpercord/tokens/<ID>` with mode
+        600.
       '';
     };
 
@@ -49,6 +53,15 @@ in
   };
 
   config = mkIf cfg.enable {
+    warnings = lib.optional (cfg.keyring.enable && plasma6) ''
+      programs.larpercord.keyring.enable turns on GNOME Keyring, but
+      services.desktopManager.plasma6 is enabled too. GNOME Keyring and
+      KWallet would both claim org.freedesktop.secrets, and a D-Bus name
+      has one owner, so they fight over it. On Plasma leave
+      programs.larpercord.keyring.enable off: KWallet already provides the
+      Secret Service that larperCord uses through secret-tool.
+    '';
+
     environment.systemPackages = [ cfg.package ];
 
     services.gnome.gnome-keyring.enable = mkIf cfg.keyring.enable true;
