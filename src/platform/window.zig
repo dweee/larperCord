@@ -27,6 +27,8 @@ pub const Wake = enum(i32) {
     /// Um arquivo de mascote mudou (ui/mascote_arquivos.zig).
     mascot = 11,
     portal = 12,
+    /// Hora de olhar os processos atrás do jogo aberto (app_presenca.zig).
+    jogo = 13,
 };
 
 /// O renderizador que abriu (para Configurações → Desempenho) e se o escolhido nas

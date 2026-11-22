@@ -12,6 +12,7 @@
   libwebp,
   libopus,
   openssl,
+  brotli,
   dbus,
   wayland,
   libsecret,
@@ -27,9 +28,22 @@
 }:
 
 let
+  # Upstream's TLS profile advertises Brotli certificate compression. The app
+  # sets it on curl's SSL_CTX, so both must link the same Brotli-enabled OpenSSL.
+  opensslBrotli = openssl.overrideAttrs (old: {
+    buildInputs = (old.buildInputs or [ ]) ++ [ brotli ];
+    configureFlags = old.configureFlags ++ [
+      "enable-brotli"
+      "--with-brotli-include=${lib.getDev brotli}/include"
+      "--with-brotli-lib=${lib.getLib brotli}/lib"
+    ];
+  });
   # The Discord gateway and voice connections use curl_ws_*: libcurl must be
   # built with WebSocket support, which nixpkgs leaves off by default.
-  curlWs = curl.override { websocketSupport = true; };
+  curlWs = curl.override {
+    openssl = opensslBrotli;
+    websocketSupport = true;
+  };
   thirdPartyLicenses = import ./third-party-licenses.nix { inherit fetchurl; };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -52,7 +66,7 @@ stdenv.mkDerivation (finalAttrs: {
     zlib
     libwebp
     libopus
-    openssl
+    opensslBrotli
   ];
 
   # The project parses its own -Doptimize values (debug/safe/fast/small) and
