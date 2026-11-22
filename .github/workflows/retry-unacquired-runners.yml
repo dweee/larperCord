@@ -5,10 +5,9 @@ name: Retry unacquired runners
     workflows:
     - Input and manual version monitoring
     - PR automation checks
+    - Sync and test upstream
+    - VM and Windows runtime
     - Verified release channels
-    - ci
-    - linux-portable
-    - pages
     types:
     - completed
 permissions:
