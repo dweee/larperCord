@@ -20,6 +20,16 @@
         "attribute": "packages.aarch64-linux.larpercord",
         "visibility": "public"
       }
+    ],
+    "aarch64-darwin": [
+      {
+        "attribute": "packages.aarch64-darwin.larpercord",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.larpercord-windows",
+        "visibility": "public"
+      }
     ]
   },
   "submodules": false,

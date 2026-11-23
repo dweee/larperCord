@@ -1,7 +1,7 @@
 //! Rich Presence: o servidor local que faz o papel do Discord do computador para
 //! jogos e apps (discord-ipc-N). Só existe com a opção ligada: desligada, não há
-//! thread, socket nem arquivo. Linux: socket Unix em $XDG_RUNTIME_DIR (só do
-//! dono); Windows: o pipe \\.\pipe\discord-ipc-N. O protocolo está em rpc_proto.zig.
+//! thread, socket nem arquivo. Linux e macOS: socket Unix em $XDG_RUNTIME_DIR ou
+//! $TMPDIR (só do dono); Windows: o pipe \\.\pipe\discord-ipc-N. O protocolo está em rpc_proto.zig.
 //!
 //! A thread daqui não fala com o gateway: entrega a atividade para a thread da
 //! interface (`take`), que manda o comando para a conta conectada.
@@ -295,9 +295,11 @@ fn closeListener() void {
 
 // --- Linux ---------------------------------------------------------------------
 
-const SockAddrUn = extern struct { family: u16, path: [108]u8 };
-const msg_dontwait = 0x40;
-const msg_nosignal = 0x4000;
+// macOS: o sockaddr_un do BSD (com o tamanho na frente) e sem MSG_NOSIGNAL; lá o
+// SIGPIPE já é ignorado pelo processo todo (sys.init).
+const SockAddrUn = if (sys.macos) extern struct { len: u8 = 106, family: u8, path: [104]u8 } else extern struct { family: u16, path: [108]u8 };
+const msg_dontwait = if (sys.macos) 0x80 else 0x40;
+const msg_nosignal = if (sys.macos) 0 else 0x4000;
 
 fn env(name: [*:0]const u8) ?[]const u8 {
     const v = c.SDL_getenv(name) orelse return null;
@@ -318,7 +320,7 @@ fn stale(p: [*:0]const u8, addr: *const SockAddrUn) bool {
     var st: c.struct_stat = undefined;
     if (c.lstat(p, &st) != 0) return false;
     if (st.st_mode & 0o170000 != 0o140000 or st.st_uid != c.getuid()) return false;
-    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+    const fd = sys.socketCloexec(c.AF_UNIX, c.SOCK_STREAM);
     if (fd < 0) return false;
     defer _ = c.close(fd);
     if (c.connect(fd, @ptrCast(addr), @sizeOf(SockAddrUn)) == 0) return false;
@@ -333,7 +335,7 @@ fn listenPosix() bool {
     while (n < 10) {
         const p = std.fmt.bufPrintSentinel(&sock_path, "{s}/discord-ipc-{d}", .{ std.mem.trimEnd(u8, dir, "/"), n }, 0) catch return false;
         const addr = unixAddr(p) orelse return false;
-        const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_CLOEXEC, 0);
+        const fd = sys.socketCloexec(c.AF_UNIX, c.SOCK_STREAM);
         if (fd < 0) return false;
         if (c.bind(fd, @ptrCast(&addr), @sizeOf(SockAddrUn)) == 0) {
             // Só o dono conecta. listen() vem depois: antes dele ninguém entra.

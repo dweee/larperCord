@@ -5,8 +5,8 @@ name: Retry unacquired runners
     workflows:
     - Input and manual version monitoring
     - PR automation checks
+    - Runtime tests
     - Sync and test upstream
-    - VM and Windows runtime
     - Verified release channels
     types:
     - completed
