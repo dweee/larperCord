@@ -10,7 +10,7 @@
     };
     # Only used by the nix-darwin module check.
     nix-darwin = {
-      url = "github:nix-darwin/nix-darwin/ff0e21a414d4547183396da1b44a66f2577b65e9";
+      url = "github:nix-darwin/nix-darwin/663d8b962a11cda261b6e9f14e03911fac94baf0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
