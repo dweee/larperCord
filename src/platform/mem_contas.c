@@ -1,21 +1,25 @@
 // Quanto cada biblioteca grande tem alocado agora (Configurações → Desempenho e o --stats):
 // o SDL, o Dear ImGui, o FreeType, o curl e o OpenSSL alocam por estas funções, que chamam o
-// mesmo malloc de sempre e só somam o tamanho de cada bloco (malloc_usable_size, _msize no
-// Windows). As funções de cada biblioteca são entregues a ela no começo do main, antes de
+// mesmo malloc de sempre e só somam o tamanho de cada bloco (malloc_usable_size, malloc_size no macOS,
+// _msize no Windows). As funções de cada biblioteca são entregues a ela no começo do main, antes de
 // ela alocar qualquer coisa (src/platform/mem_contas.zig).
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <malloc.h>
 
 #if defined(LARPER_MIMALLOC)
 // Com o mimalloc (zig build -Dmimalloc=true) o tamanho vem dele: no Windows o _msize da DLL
 // do C não conhece os blocos do mimalloc.
 #include "mimalloc.h"
 #define USABLE(p) mi_usable_size(p)
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>
+#define USABLE(p) malloc_size(p)
 #elif defined(_WIN32)
+#include <malloc.h>
 #define USABLE(p) _msize(p)
 #else
+#include <malloc.h>
 #define USABLE(p) malloc_usable_size(p)
 #endif
 
