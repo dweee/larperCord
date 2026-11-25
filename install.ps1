@@ -15,6 +15,8 @@ if ($Uninstall -or $Purge) {
     Get-Process larpercord -ErrorAction SilentlyContinue | Stop-Process -Force
     Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item $shortcut -Force -ErrorAction SilentlyContinue
+    # The app registers its notification identity (name and icon) for the current user.
+    Remove-Item 'HKCU:\Software\Classes\AppUserModelId\dev.larpercord' -Recurse -Force -ErrorAction SilentlyContinue
     if (-not $Purge) {
         Write-Host 'larperCord removed. Your settings are still in %APPDATA%\larpercord (-Purge deletes them too).'
         return

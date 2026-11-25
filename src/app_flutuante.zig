@@ -137,6 +137,9 @@ fn abrir(app: *App, alvo: fl.Alvo) void {
         p.gate.redraw();
         return;
     }
+    // Ela desenha com o renderizador da principal: com a principal na bandeja sem a parte
+    // da GPU (App.releaseGpu), ele volta (a janela da principal continua escondida).
+    if (!app.ensureGpu()) return app.st.showToast(now(), true, "não consegui abrir a janela flutuante", "couldn't open the floating window", .{});
     const driver = if (c.SDL_GetCurrentVideoDriver()) |v| std.mem.span(v) else "";
     const posiciona = !std.mem.eql(u8, driver, "wayland");
     // A área útil do monitor da principal e a escala que o SDL deixa para o app.
@@ -145,7 +148,7 @@ fn abrir(app: *App, alvo: fl.Alvo) void {
     _ = c.SDL_GetDisplayUsableBounds(display, &area);
     const set = &app.st.settings;
     const guardada = fl.lida(set.pip_x, set.pip_y, set.pip_w, set.pip_h);
-    const geo = fl.abertura(guardada, .{ .x = area.x, .y = area.y, .w = area.w, .h = area.h }, platform.contentScale(app.win.window), posiciona);
+    const geo = fl.abertura(guardada, .{ .x = area.x, .y = area.y, .w = area.w, .h = area.h }, app.win.scale(), posiciona);
 
     // A superfície da janela flutuante direto na memória (XShm no X11, GDI no Windows): sem
     // isto o SDL cria um segundo renderizador, com um contexto de GPU, só para mostrar a
@@ -169,7 +172,7 @@ fn abrir(app: *App, alvo: fl.Alvo) void {
         std.log.warn("janela flutuante: {s}", .{c.SDL_GetError()});
         return app.st.showToast(now(), true, "não consegui abrir a janela flutuante", "couldn't open the floating window", .{});
     };
-    const k = platform.contentScale(app.win.window);
+    const k = app.win.scale();
     _ = c.SDL_SetWindowMinimumSize(win, @intFromFloat(@as(f32, @floatFromInt(fl.min_w)) * k), @intFromFloat(@as(f32, @floatFromInt(fl.min_h)) * k));
     if (platform.decodeIcon(platform.iconPng(app.st.settings.mascot == 1, .window))) |icon| {
         _ = c.SDL_SetWindowIcon(win, icon);
@@ -553,7 +556,7 @@ fn build(app: *App, now_ms: i64) bool {
 fn present(app: *App, dd: *c.ImDrawData, clear: [4]f32) void {
     const p = &app.pip;
     const win = p.win orelse return;
-    const r = app.win.renderer;
+    const r = app.win.renderer orelse return;
     var pw: c_int = 0;
     var ph: c_int = 0;
     _ = c.SDL_GetWindowSizeInPixels(win, &pw, &ph);

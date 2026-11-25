@@ -10,6 +10,7 @@ const accounts = @import("core/accounts.zig");
 const discord = @import("net/discord.zig");
 const accounts_store = @import("net/accounts_store.zig");
 const msg_cache = @import("net/msg_cache.zig");
+const gif_clips = @import("ui/gif_clips.zig");
 const i18n = @import("ui/i18n.zig");
 const nowMs = @import("net/fake_gateway.zig").nowMs;
 const c = @import("c");
@@ -190,11 +191,15 @@ fn forget(id: types.Id) void {
     const a = accounts_store.list.find(id) orelse return;
     const acc = a.*;
     // A conta aberta não grava mais nada no cache (que vai ser apagado).
-    if (id == accounts_store.session) msg_cache.detach();
+    if (id == accounts_store.session) {
+        msg_cache.detach();
+        gif_clips.detach();
+    }
     accounts_store.forgetToken(&acc);
     _ = accounts_store.list.remove(id);
     accounts_store.save();
     msg_cache.removeAccount(id);
+    gif_clips.removeAccount(id);
     if (prev_account == id) prev_account = 0;
 }
 
@@ -237,6 +242,7 @@ pub fn ready(app: *App) void {
     const me = app.store.me;
     const list = &accounts_store.list;
     msg_cache.setAccount(if (app.store.demo) 0 else me);
+    gif_clips.setAccount(if (app.store.demo) 0 else me);
     if (app.store.demo) {
         // (No QA a troca de conta entra na demonstração: fica a escolhida.)
         if (list.find(accounts_store.session) == null) accounts_store.session = me;

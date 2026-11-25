@@ -38,6 +38,7 @@ const settings_video = @import("ui/settings_video.zig");
 const settings_jogos = @import("ui/settings_jogos.zig");
 const ffmpeg = @import("platform/ffmpeg.zig");
 const proxy = @import("net/proxy.zig");
+const enderecos = @import("net/enderecos.zig");
 const kdl = @import("theme/kdl.zig");
 const custom = @import("theme/custom.zig");
 const guild_color = @import("ui/guild_color.zig");
@@ -45,6 +46,7 @@ const theme_mod = @import("theme/theme.zig");
 const plugin_host = @import("plugins/host.zig");
 const mentions = @import("core/mentions.zig");
 const envio = @import("core/envio.zig");
+const temporarios = @import("platform/temporarios.zig");
 const autocomplete = @import("ui/autocomplete.zig");
 const ime = @import("ui/ime.zig");
 const interact = @import("ui/interact.zig");
@@ -53,10 +55,16 @@ const leitura = @import("core/leitura.zig");
 const saved_ui = @import("ui/saved.zig");
 const app_conjuntos = @import("app_conjuntos.zig");
 const app_lembretes = @import("app_lembretes.zig");
+const app_pastas = @import("app_pastas.zig");
 const msg_cache = @import("net/msg_cache.zig");
 const busca_local = @import("net/busca_local.zig");
+const gif_clips = @import("ui/gif_clips.zig");
 const state_cache = @import("net/state_cache.zig");
 const state_snapshot = @import("core/state_snapshot.zig");
+const insp_cap = @import("inspect/captura.zig");
+const insp_reg = @import("inspect/registros.zig");
+const insp_cmd = @import("inspect/comandos.zig");
+const inspetor = @import("inspect/ui.zig");
 const jsonx = @import("net/jsonx.zig");
 const fsutil = @import("platform/fsutil.zig");
 const apagar = @import("platform/apagar.zig");
@@ -65,6 +73,8 @@ const app_accounts = @import("app_accounts.zig");
 const app_chamada = @import("app_chamada.zig");
 const app_presenca = @import("app_presenca.zig");
 const app_flutuante = @import("app_flutuante.zig");
+const app_ctl = @import("app_ctl.zig");
+const app_notificacao = @import("app_notificacao.zig");
 const voz_audio = @import("net/voz_audio.zig");
 const aviso = @import("core/aviso.zig");
 const sons = @import("core/sons.zig");
@@ -76,6 +86,9 @@ var auto_tried_buf: [32]u8 = @splat(0);
 var auto_tried_len: usize = 0;
 const lsp_ui = @import("ui/lsp_ui.zig");
 const mem_tune = @import("platform/mem_tune.zig");
+const app_memoria = @import("app_memoria.zig");
+/// --stats: o minuto da última RAM por partes no log (-1 = a abertura ainda não acabou).
+var stats_ram_min: i64 = -1;
 const mascote = @import("ui/mascote.zig");
 const mascote_arquivos = @import("ui/mascote_arquivos.zig");
 const icone_sistema = @import("platform/icone_sistema.zig");
@@ -94,6 +107,14 @@ const Debounce = @import("core/debounce.zig").Debounce;
 const sub_delay_ms = 250;
 const SubReq = struct { guild: types.Id, channel: types.Id, thread: types.Id };
 
+/// QA_SUITE=rede e conta-grande: o app abre no Discord de mentira (qa_rede.zig). Fora do
+/// executável do QA que pode trocar o endereço é sempre false, sem nem olhar a variável.
+fn qaRede(opts: Options) bool {
+    if (comptime !enderecos.pode_trocar) return false;
+    const suite = std.mem.span(c.SDL_getenv("QA_SUITE") orelse return false);
+    return opts.qa and (std.mem.eql(u8, suite, "rede") or std.mem.eql(u8, suite, "conta-grande"));
+}
+
 pub const Options = struct {
     theme: ?[]const u8 = null,
     shot: ?[*:0]const u8 = null,
@@ -110,6 +131,11 @@ pub const Options = struct {
     login: bool = false,
     /// Força o idioma (ignora as configurações).
     lang: ?@import("ui/i18n.zig").Lang = null,
+    /// O controle de fora (app_ctl.zig): no app de verdade, ou na demonstração e no QA
+    /// com LARPER_CTL (que usam outro arquivo da porta).
+    ctl: enum { off, app, demo } = .off,
+    /// Abre com o Inspetor aberto e gravando desde o começo (os pedidos da abertura também).
+    inspect: bool = false,
 };
 
 var wake_type_global: u32 = 0;
@@ -239,6 +265,12 @@ pub const App = struct {
     /// Muita memória acabou de ser solta (READY, rajada de imagens): o tique
     /// do relógio devolve ao sistema.
     trim_wanted: std.atomic.Value(bool) = .init(false),
+    /// A janela foi para a bandeja e a parte da GPU saiu (`releaseGpu`): o tique devolve
+    /// tudo o que der (no Windows, os heaps e o conjunto de trabalho também).
+    giveback_wanted: std.atomic.Value(bool) = .init(false),
+    /// Quantas vezes a parte da GPU saiu e voltou (o QA confere).
+    gpu_releases: u32 = 0,
+    gpu_restores: u32 = 0,
     /// O tique do relógio acordou só porque o minuto virou (sem RAM nova para
     /// mostrar): se um quadro já saiu neste minuto, não precisa de outro.
     minute_tick: std.atomic.Value(bool) = .init(false),
@@ -274,6 +306,11 @@ pub const App = struct {
         const started = c.SDL_GetTicksNS();
         const app = try gpa.create(App);
         errdefer gpa.destroy(app);
+        // --inspect (ou LARPER_INSPECT): grava desde já, para os pedidos da abertura entrarem.
+        if (opts.inspect or c.SDL_getenv("LARPER_INSPECT") != null) {
+            inspetor.app_ptr = app;
+            inspetor.open();
+        }
 
         // O fontconfig se prepara enquanto a janela abre (ver fc_warm.zig).
         const fc_warm = @import("platform/fc_warm.zig").start();
@@ -302,6 +339,8 @@ pub const App = struct {
         busca_local.setWake(&buscaWake);
         timeline.mark(.janela);
 
+        // O ImGui e o FreeType dele alocam pelas funções que contam (platform/mem_contas.zig).
+        @import("platform/mem_contas.zig").imgui();
         _ = c.ImGui_CreateContext(null);
         const io = c.ImGui_GetIO();
         io.*.IniFilename = null;
@@ -333,6 +372,7 @@ pub const App = struct {
         // Cache de mensagens e contas: o QA e os prints nunca usam os de verdade.
         msg_cache.init(opts.qa);
         msg_cache.off = opts.shot != null;
+        gif_clips.off = opts.shot != null;
         // O modo QA já desde aqui: a abertura pelo retrato lê arquivos (os conjuntos de
         // abas) antes do laço, e no QA eles ficam em qa-out/, nunca nos de verdade.
         if (opts.qa) qa_mod.enable();
@@ -387,8 +427,10 @@ pub const App = struct {
         app.themes.watch(wakeTheme);
         mascote_arquivos.setup(wakeMascot);
         // Antes da rede: a thread do gateway inicia o libcurl pelo mesmo caminho.
-        app.images = try images.Cache.init(app.win.renderer, app.win.wake_type);
+        app.images = try images.Cache.init(app.win.renderer.?, app.win.wake_type);
         @import("ui/exportar.zig").init(app.win.wake_type);
+        // Os clipes dos GIFs favoritos (o QA em qa-out/, nunca no cache de verdade).
+        gif_clips.init(app.win.wake_type, opts.qa);
 
         // Com token salvo: conecta direto (a tela de abertura aparece enquanto
         // isso). Sem token: a tela de login. Prints e QA usam a demonstração.
@@ -396,6 +438,9 @@ pub const App = struct {
         const qa_login = opts.qa and if (c.SDL_getenv("QA_SUITE")) |q| std.mem.eql(u8, std.mem.span(q), "login") else false;
         if (opts.login or qa_login) {
             app.login.begin(.form);
+        } else if (qaRede(opts)) {
+            // O net/discord.zig de verdade contra o Discord de mentira local (qa_rede.zig).
+            if (comptime enderecos.pode_trocar) try @import("qa_rede.zig").comecar(app);
         } else if (opts.demo or opts.qa or (opts.shot != null and c.SDL_getenv("LARPER_SHOT_REAL") == null)) {
             // (LARPER_SHOT_REAL=1: print com a conta de verdade, para depurar.)
             // LARPER_DEMO_READY_MS: o READY da demonstração demora como o de verdade, e
@@ -431,6 +476,7 @@ pub const App = struct {
         updater.offline = opts.qa;
         updater.cleanLeftovers();
         if (opts.qa) tray.fake = false;
+        @import("platform/ctl.zig").allowed = opts.ctl != .off;
         // O ícone da bandeja espera a janela aparecer: perguntar pelo painel e abrir
         // o processo do ícone não atrasam o primeiro quadro.
         app.tray_on_was = app.st.settings.close_to_tray;
@@ -451,11 +497,14 @@ pub const App = struct {
     /// Fechou a janela e ela deve ficar na bandeja? O app segue conectado e
     /// avisando, sem desenhar. Falso: sem bandeja, ou opção desligada; aí fechar
     /// sai de verdade, nunca fica um processo invisível sem caminho de volta.
-    fn hideToTray(app: *App) bool {
+    pub fn hideToTray(app: *App) bool {
         if (app.opts.shot != null or app.restart_wanted) return false;
         const logged_in = app.store.ready and !app.login.visible();
         if (!janela.wantsTray(app.st.settings.close_to_tray, logged_in)) return false;
         if (!app.trayShow(true)) return false;
+        // O vídeo em tela cheia sai antes, e a janela volta ao que era ainda à vista (é
+        // guardada assim, e volta da bandeja fora da tela cheia).
+        @import("ui/video.zig").antesDaBandeja(app.win.window);
         _ = c.SDL_HideWindow(app.win.window);
         app.in_tray = true;
         // Sem quadros daqui em diante: o que depende do quadro fica certo agora.
@@ -478,15 +527,28 @@ pub const App = struct {
     /// Volta da bandeja (ou traz para a frente, se a janela já estava aberta). Com
     /// "Fechar para a bandeja" ligado o ícone fica; desligado, não há ícone para tirar.
     pub fn showWindow(app: *App) void {
+        var tok_buf: [bandeja.token_max + 1]u8 = undefined;
+        app.showWindowWith(tray.takeActivationToken(&tok_buf));
+    }
+
+    /// `showWindow` com a ficha do xdg-activation de quem pediu: a do painel, no clique
+    /// no ícone, ou a do servidor de notificações, no clique numa notificação.
+    pub fn showWindowWith(app: *App, token: ?[:0]const u8) void {
+        // Da bandeja, a janela foi embora com a parte da GPU: volta agora, ainda escondida.
+        if (!app.ensureGpu()) {
+            // Sem janela não há como seguir: sai como pelo Sair (grava tudo).
+            var quit = std.mem.zeroes(c.SDL_Event);
+            quit.type = c.SDL_EVENT_QUIT;
+            _ = c.SDL_PushEvent(&quit);
+            return;
+        }
         if (!app.st.settings.close_to_tray) tray.hide();
         app.in_tray = false;
         app.tray_misses = 0;
-        // Wayland: com a ficha que o painel mandou junto do clique, o compositor deixa
-        // a janela voltar com o foco. O SDL só a usa ao mostrar uma janela escondida
+        // Wayland: com a ficha que veio junto do clique, o compositor deixa a janela
+        // voltar com o foco. O SDL só a usa ao mostrar uma janela escondida
         // (XDG_ACTIVATION_TOKEN, lido do ambiente dele e apagado em seguida).
-        var tok_buf: [bandeja.token_max + 1]u8 = undefined;
-        const token = tray.takeActivationToken(&tok_buf);
-        const flags = c.SDL_GetWindowFlags(app.win.window);
+        const flags = app.win.flags();
         const hidden = flags & c.SDL_WINDOW_HIDDEN != 0;
         const minimized = flags & c.SDL_WINDOW_MINIMIZED != 0;
         const env = c.SDL_GetEnvironment();
@@ -500,8 +562,49 @@ pub const App = struct {
         // Aberta, atrás de outra ou minimizada: no Wayland a ficha vai direto ao
         // compositor. O SDL_RaiseWindow pediria outra com o foco no painel, que o KWin
         // e o Mutter recusam.
-        if (token != null and !hidden and wl_ativacao.activate(app.win.window, token.?)) return;
+        if (token != null and !hidden and wl_ativacao.activate(app.win.window.?, token.?)) return;
         _ = c.SDL_RaiseWindow(app.win.window);
+    }
+
+    /// Na bandeja, sem a janela flutuante (que desenha com o mesmo renderizador): a parte
+    /// da GPU vai embora, em vez de só esconder a janela. Saem as texturas das imagens
+    /// (as pequenas que estavam na tela ficam em pixels: images.Cache.detach), do vídeo,
+    /// das camadas, dos efeitos do tema, do editor de imagem e o atlas das fontes (o
+    /// ImGui guarda os pixels dele e refaz a textura sozinho), e depois o renderizador
+    /// (o contexto da GPU) e a janela. O tique do relógio devolve a memória ao sistema.
+    /// Volta com `ensureGpu`, no mostrar.
+    fn releaseGpu(app: *App) void {
+        if (app.win.window == null) return;
+        // A tecla apertada não fica presa: o ImGui solta tudo ao perder o foco (o aviso
+        // do SDL chegaria depois de o backend sair).
+        c.ImGuiIO_AddFocusEvent(app.io, false);
+        app.images.detach();
+        @import("ui/video.zig").dropTexture();
+        @import("ui/camada.zig").dropTextures();
+        @import("ui/fx.zig").dropAll();
+        @import("ui/editor_imagem.zig").dropTexture();
+        // Windows: o ícone do balão é desta janela (o próximo usa a do ícone da bandeja).
+        sys.toastExpire(0, true);
+        c.cImGui_ImplSDLRenderer3_Shutdown();
+        c.cImGui_ImplSDL3_Shutdown();
+        app.win.release();
+        app.gpu_releases += 1;
+        app.giveback_wanted.store(true, .release);
+        if (app.opts.stats) std.log.info("bandeja: a janela, o renderizador e as texturas saíram ({d} imagens em pixels)", .{app.images.parkedCount()});
+    }
+
+    /// A janela e o renderizador de novo (escondida: quem chama mostra), com os backends
+    /// do ImGui; o atlas das fontes volta para a GPU no próximo quadro, e as imagens
+    /// quando forem desenhadas. Falso: não deu para criar a janela.
+    pub fn ensureGpu(app: *App) bool {
+        if (app.win.window != null) return true;
+        if (!app.win.recreate(mascote.Kind.of(app.st.settings.mascot) == .classico)) return false;
+        _ = c.cImGui_ImplSDL3_InitForSDLRenderer(app.win.window, app.win.renderer);
+        _ = c.cImGui_ImplSDLRenderer3_Init(app.win.renderer);
+        app.images.attach(app.win.renderer.?);
+        app.gate.redraw();
+        app.gpu_restores += 1;
+        return true;
     }
 
     /// Os ícones seguem o mascote das Configurações (ui/mascote.zig): o da janela
@@ -518,6 +621,7 @@ pub const App = struct {
         if (!(first and !classic)) app.win.setIcon(classic);
         tray.setMascot(classic);
         sys.setToastMascot(classic);
+        app_notificacao.mascote(classic);
         // O QA e os prints nunca mexem na pasta do usuário.
         if (!app.opts.qa and app.opts.shot == null) _ = icone_sistema.sync(platform.iconPng(classic, .menu), classic);
     }
@@ -546,8 +650,8 @@ pub const App = struct {
     }
 
     /// Clique no ícone da bandeja: alterna a janela (ver janela.trayClick).
-    fn toggleWindow(app: *App) void {
-        const flags = c.SDL_GetWindowFlags(app.win.window);
+    pub fn toggleWindow(app: *App) void {
+        const flags = app.win.flags();
         const vista = janela.trayVista(
             app.in_tray or flags & c.SDL_WINDOW_HIDDEN != 0,
             flags & (c.SDL_WINDOW_MINIMIZED | c.SDL_WINDOW_OCCLUDED) != 0,
@@ -618,7 +722,7 @@ pub const App = struct {
 
     /// Pontos da interface para pixels da janela: o único fator de escala do app.
     pub fn uiScale(app: *const App) f32 {
-        return platform.contentScale(app.win.window) * app.ui_size;
+        return app.win.scale() * app.ui_size;
     }
 
     pub fn destroy(app: *App) void {
@@ -629,7 +733,10 @@ pub const App = struct {
         app_flutuante.fechar(app, false);
         tray.hide();
         sys.toastExpire(0, true);
+        // As notificações com botões saem da tela: ninguém mais atenderia os botões.
+        app_notificacao.parar();
         instance.stopListening();
+        app_ctl.stop();
         if (keep) app.saveSettings();
         // A aba ativa do conjunto em uso (o resto já foi gravado na hora).
         if (keep and (app.store.ready or app.store.from_cache)) app_conjuntos.flush(app);
@@ -672,8 +779,14 @@ pub const App = struct {
         @import("ui/video.zig").shutdown();
         @import("ui/voice_msg.zig").shutdown();
         @import("ui/gravar_audio.zig").shutdown();
+        // O editor de imagem aberto, e o que sobrou na pasta temporária nossa (a rede já parou).
+        @import("ui/editor_imagem.zig").fechar();
+        temporarios.limparTudo();
         // Exportação ou "Salvar" andando: cancela e espera (só fica o .part, que elas apagam).
         @import("ui/exportar.zig").shutdown();
+        // O clipe de GIF sendo feito para e a lista dele é gravada (antes das imagens: a
+        // thread dele usa o libcurl).
+        gif_clips.deinit();
         // (Por último, lá dentro: as threads de mídia e de vídeo usam o libcurl.)
         app.images.deinit();
         app.st.saved.deinit(app.gpa);
@@ -683,8 +796,12 @@ pub const App = struct {
         send_limits.reset();
         app.themes.deinit();
         @import("ui/camada.zig").shutdown();
-        c.cImGui_ImplSDLRenderer3_Shutdown();
-        c.cImGui_ImplSDL3_Shutdown();
+        @import("ui/carimbo.zig").shutdown();
+        // Saindo da bandeja, os backends já tinham saído junto com a janela (`releaseGpu`).
+        if (app.win.window != null) {
+            c.cImGui_ImplSDLRenderer3_Shutdown();
+            c.cImGui_ImplSDL3_Shutdown();
+        }
         c.ImGui_DestroyContext(null);
         app.win.deinit();
         // Por último: quem assumir a trava (um reinício) já acha tudo gravado.
@@ -693,6 +810,7 @@ pub const App = struct {
     }
 
     pub fn cmd(app: *App, command: ev.Command) void {
+        insp_reg.evento(.command, command);
         switch (app.net) {
             .none => {},
             .fake => |*g| g.commands.push(command),
@@ -703,13 +821,15 @@ pub const App = struct {
     /// Conecta na conta de verdade. O gateway passa a ser dono do token.
     pub fn startReal(app: *App, token: [:0]u8) !void {
         app.store.demo = false;
-        app.net = .{ .real = .{
-            .commands = try Queue(ev.Command).init(app.gpa),
-            .sink = .{ .ctx = app, .push = pushEvent },
-            .token = token,
-            // Já no IDENTIFY: quem está invisível não pode piscar online ao abrir o app.
-            .status = @fromBackingInt(@intCast(@min(app.st.settings.my_status, 3))),
-        } };
+        app.net = .{
+            .real = .{
+                .commands = try Queue(ev.Command).init(app.gpa),
+                .sink = .{ .ctx = app, .push = pushEvent },
+                .token = token,
+                // Já no IDENTIFY: quem está invisível não pode piscar online ao abrir o app.
+                .status = @fromBackingInt(@intCast(@min(app.st.settings.my_status, 3))),
+            },
+        };
         // Falhou: o token volta para quem chamou (nada de liberar de novo no stop).
         app.net.real.start() catch |err| {
             app.net.real.commands.deinit();
@@ -752,16 +872,16 @@ pub const App = struct {
     // --- Anexos ----------------------------------------------------------------
 
     /// Limite do Discord para quem não tem Nitro.
-    const max_upload: u64 = 10 * 1024 * 1024;
+    const max_upload = envio.max_upload;
 
     fn clearUploads(app: *App) void {
         for (app.st.uploads.items) |u| dropUpload(u);
         app.st.uploads.clearRetainingCapacity();
     }
 
-    /// Tira um arquivo da bandeja. O de imagem colada era só nosso: apaga.
+    /// Tira um arquivo da bandeja. O de imagem colada ou editada era só nosso: apaga.
     fn dropUpload(u: @import("ui/state.zig").Upload) void {
-        if (types.isPastedFile(u.path)) _ = c.unlink(u.path.ptr);
+        if (types.isPastedFile(u.path)) temporarios.apagar(u.path);
         std.heap.c_allocator.free(u.path);
         if (u.alt.len > 0) std.heap.c_allocator.free(u.alt);
     }
@@ -791,6 +911,8 @@ pub const App = struct {
             if (c.stbi_info_from_memory(@ptrCast(data), @intCast(size), &w, &h, &comp) != 0 and w > 0 and h > 0) {
                 up.width = @intCast(@min(w, 65535));
                 up.height = @intCast(@min(h, 65535));
+                // Imagem parada: ganha o Editar (cortar e esconder pedaços).
+                up.editavel = @import("core/imagem_edicao.zig").podeEditar(@as([*]const u8, @ptrCast(data))[0..size]);
             }
         }
         st.uploads.append(app.gpa, up) catch std.heap.c_allocator.free(z);
@@ -868,18 +990,18 @@ pub const App = struct {
         c.SDL_ShowOpenFileDialog(pickedCb, app, app.win.window, &filters, filters.len, null, false);
     }
 
-    /// Imagem colada: vai para um arquivo temporário e entra na bandeja.
+    /// Imagem colada: vai para um arquivo temporário (na pasta só nossa) e entra na bandeja.
     fn pasteImage(app: *App) void {
         const kind = platform.clipboardImage() orelse return;
         var size: usize = 0;
         const data = c.SDL_GetClipboardData(kind.mime, &size) orelse return;
         defer c.SDL_free(data);
-        const dir = sys.tempDir();
-        var pbuf: [512]u8 = undefined;
+        var nbuf: [96]u8 = undefined;
+        var pbuf: [1100]u8 = undefined;
         app.paste_n += 1;
         // O nome do arquivo aparece na bandeja e vai junto para o Discord.
-        const path = i18n.fmtZ(&pbuf, "{s}/larpercord-colado-{d}-{d}.{s}", "{s}/larpercord-pasted-{d}-{d}.{s}", .{ dir, c.getpid(), app.paste_n, kind.ext });
-        if (path.len == 0) return;
+        const nome = i18n.fmt(&nbuf, "larpercord-colado-{d}-{d}.{s}", "larpercord-pasted-{d}-{d}.{s}", .{ c.getpid(), app.paste_n, kind.ext });
+        const path = temporarios.novo(&pbuf, nome) orelse return app.st.showToast(now(), true, "não consegui colar a imagem", "couldn't paste the image", .{});
         const saved = if (kind.bitmap) blk: {
             const surface = c.SDL_LoadBMP_IO(c.SDL_IOFromConstMem(data, size), true) orelse {
                 std.log.warn("colar: bitmap de {d} bytes não abriu: {s}", .{ size, std.mem.span(c.SDL_GetError()) });
@@ -895,8 +1017,10 @@ pub const App = struct {
 
     /// Volta ao estado de antes do login: sem conta, sem abas, sem nada.
     pub fn resetSession(app: *App) void {
-        // A janela flutuante segue algo da conta que está saindo.
+        // A janela flutuante segue algo da conta que está saindo, e as notificações
+        // também (os botões delas apontam para canais desta conta).
         app_flutuante.fechar(app, true);
+        app_notificacao.fecharTodas();
         // O que estava na tela vai para o cache antes de sumir, e os conjuntos de
         // abas da conta para o arquivo dela.
         msg_cache.flushDirty(&app.store);
@@ -916,6 +1040,7 @@ pub const App = struct {
         app.st.saved.clear(app.gpa);
         app.st.saved.owner = 0;
         app_lembretes.reset(app);
+        app_pastas.reset();
         app.plugins.setAccount(0);
         send_limits.reset();
         app.sub_wait.cancel();
@@ -1052,7 +1177,11 @@ pub const App = struct {
         // Aqui, e não na thread da UI: varrer as arenas leva milissegundos. Em
         // call fica para depois: durante a varredura, quem pede memória espera,
         // e a voz não pode esperar. O pedido continua valendo até a call acabar.
-        if (!voz_audio.in_call.load(.acquire) and app.trim_wanted.swap(false, .acq_rel)) mem_tune.trim();
+        if (!voz_audio.in_call.load(.acquire)) {
+            const all = app.giveback_wanted.swap(false, .acq_rel);
+            if (app.trim_wanted.swap(false, .acq_rel) or all) mem_tune.trim();
+            if (all) mem_tune.giveBack();
+        }
         // O número da RAM: só se está na tela. Varrer o mapa de memória do
         // processo leva milissegundos, e o tique roda mesmo com tudo parado.
         const ram_seen = @atomicRmw(bool, &app.stats.ram_seen, .Xchg, false, .monotonic);
@@ -1062,10 +1191,13 @@ pub const App = struct {
             const mem = platform.selfMemKb();
             kb = mem.pss;
             @atomicStore(u32, &app.stats.file_kb, mem.file, .monotonic);
-            if (!voz_audio.in_call.load(.acquire)) if (mem_tune.heap()) |h| {
+            const em_call = voz_audio.in_call.load(.acquire);
+            if (!em_call) if (mem_tune.heap()) |h| {
                 @atomicStore(u32, &app.stats.heap_used_kb, h.used_kb, .monotonic);
                 @atomicStore(u32, &app.stats.heap_free_kb, h.free_kb, .monotonic);
             };
+            // O mapa de memória inteiro, para Desempenho dividir a RAM por partes.
+            app_memoria.medir(!em_call, mem.pss);
         }
         if (app.opts.stats) std.log.info("laço: {d} voltas", .{prof_turns.load(.monotonic)});
         const S = struct {
@@ -1169,6 +1301,8 @@ pub const App = struct {
         app.st.voice_out_failed = false;
         voz_audio.sh.server_mute.store(false, .release);
         voz_audio.sh.server_deaf.store(false, .release);
+        // O aperte para falar apertado de fora (larpercord ctl) não passa para a próxima call.
+        voz_audio.holdExternal(false);
     }
 
     /// O servidor nos mutou ou ensurdeceu (ou deixou de): a thread de voz para
@@ -1309,7 +1443,7 @@ pub const App = struct {
         if (file.len == 0) return;
         const e = mascote_arquivos.find(file) orelse return;
         if (e.problem) |pr| {
-            const info = @import("ui/mascote_visual.zig").issue_info[@intFromEnum(pr.issue)];
+            const info = @import("ui/mascote_visual.zig").issue_info[@backingInt(pr.issue)];
             app.st.showToast(now(), true, "{s}.kdl:{d}:{d}: {s}", "{s}.kdl:{d}:{d}: {s}", .{ file, pr.line, pr.col, i18n.tr(info.pt, info.en) });
         } else app.st.showToast(now(), false, "mascote recarregado: {s}", "mascot reloaded: {s}", .{e.title.slice()});
     }
@@ -1363,7 +1497,7 @@ pub const App = struct {
         return std.fmt.bufPrintSentinel(buf, "{s}/drafts.kdl", .{p[0..slash]}, 0) catch null;
     }
 
-    fn saveDrafts(app: *App) void {
+    pub fn saveDrafts(app: *App) void {
         if (!app.st.drafts.dirty) return;
         if (app.opts.shot != null or app.opts.qa) {
             app.st.drafts.dirty = false;
@@ -1527,21 +1661,46 @@ pub const App = struct {
         const target = cs.info.last_message;
         app.store.markRead(id);
         app.st.filtros.clear(&app.store, id);
+        // Lida aqui: as notificações dela saem da tela.
+        app_notificacao.lida(id);
         if (target != 0 and (asked or app.st.window_focused)) app.cmd(.{ .ack = .{ .channel = id, .message = target, .last_viewed = leitura.lastViewed(now()) } });
     }
 
     /// "Marcar como lido" (canal ou servidor), pedido pela pessoa.
     fn markReadAction(app: *App, id: types.Id) void {
-        const st = &app.st;
         if (app.store.channel(id)) |cs| {
             cs.divider_after = 0;
             app.readChannel(id, true);
             return;
         }
+        if (app.store.guild(id) == null) return;
+        var bulk: std.ArrayList([2]types.Id) = .empty;
+        app.markGuildRead(id, &bulk);
+        app.sendBulk(&bulk);
+    }
+
+    /// "Marcar pasta como lida": todos os servidores dela num pedido só.
+    fn markFolderRead(app: *App, folder: u64) void {
+        const f = app.store.folderById(folder) orelse return;
+        var bulk: std.ArrayList([2]types.Id) = .empty;
+        for (f.guilds) |gid| if (app.store.guild(gid) != null) app.markGuildRead(gid, &bulk);
+        app.sendBulk(&bulk);
+    }
+
+    fn sendBulk(app: *App, bulk: *std.ArrayList([2]types.Id)) void {
+        const ca = std.heap.c_allocator;
+        if (bulk.items.len == 0) return bulk.deinit(ca);
+        const owned = bulk.toOwnedSlice(ca) catch return bulk.deinit(ca);
+        app.cmd(.{ .ack_bulk = owned });
+    }
+
+    /// Os canais do servidor lidos aqui; os que o Discord ainda acha não lidos vão para `bulk`.
+    fn markGuildRead(app: *App, id: types.Id, bulk: *std.ArrayList([2]types.Id)) void {
+        const st = &app.st;
         const g = app.store.guild(id) orelse return;
         const list = app.store.channelsOf(id);
         const ca = std.heap.c_allocator;
-        var bulk: std.ArrayList([2]types.Id) = .empty;
+        const before = bulk.items.len;
         for (list) |parent_ch| {
             // O canal e as threads dele.
             const threads = app.store.threadsOf(parent_ch);
@@ -1557,10 +1716,7 @@ pub const App = struct {
         }
         g.unread = false;
         g.mentions = 0;
-        if (store_mod.read_debug) std.log.info("leitura: servidor {d} marcado como lido, {d} canais no ack", .{ id, bulk.items.len });
-        if (bulk.items.len == 0) return bulk.deinit(ca);
-        const owned = bulk.toOwnedSlice(ca) catch return bulk.deinit(ca);
-        app.cmd(.{ .ack_bulk = owned });
+        if (store_mod.read_debug) std.log.info("leitura: servidor {d} marcado como lido, {d} canais no ack", .{ id, bulk.items.len - before });
     }
 
     /// "Marcar como não lida": o canal volta a estar não lido desde esta
@@ -1646,7 +1802,7 @@ pub const App = struct {
         // Para o "tentar de novo" mandar igual.
         app.store.outbox.put(app.gpa, app.st.nonce, opts, file_opts) catch {};
         const copy = ca.dupe(u8, out_text) catch return ups.len > 0;
-        app.cmd(.{ .send_message = .{ .channel = ch, .content = copy, .nonce = app.st.nonce, .reply_to = reply_to, .files = files, .opts = opts, .file_opts = file_opts } });
+        app.cmd(.{ .send_message = .{ .channel = ch, .content = copy, .nonce = app.st.nonce, .reply_to = reply_to, .files = files, .opts = opts, .file_opts = file_opts, .strip_metadata = app.st.settings.strip_metadata } });
         send_limits.noteSent(&app.store, ch, now());
         return true;
     }
@@ -1676,7 +1832,7 @@ pub const App = struct {
 
     /// Trocou de canal: o texto da caixa vira o rascunho do anterior e o
     /// rascunho do novo volta para a caixa (uma edição em andamento é cancelada).
-    fn syncDraft(app: *App) void {
+    pub fn syncDraft(app: *App) void {
         const st = &app.st;
         const ch = st.activeChannel() orelse 0;
         if (!st.drafts.switchTo(app.gpa, ch, &st.input, st.editing == 0)) return;
@@ -1704,6 +1860,7 @@ pub const App = struct {
     }
 
     pub fn handle(app: *App, a: ev.Action) void {
+        insp_reg.evento(.action, a);
         const st = &app.st;
         if (app.opts.qa and c.SDL_getenv("QA_DEBUG") != null) std.debug.print("[ação] {t}\n", .{a});
         switch (a) {
@@ -1850,6 +2007,8 @@ pub const App = struct {
                 // A lista muda na hora; a resposta (com este `req`) confirma.
                 const list = &app.store.gif_favorites;
                 list.toggleLocal(f.url, f.shown, f.add);
+                // O clipe sai do que a tela acabou de mostrar (numa thread, sem rede).
+                gif_clips.starred(f.url, f.shown, f.add);
                 const ca = std.heap.c_allocator;
                 const url = ca.dupe(u8, f.url) catch return;
                 const src = ca.dupe(u8, f.src) catch return ca.free(url);
@@ -1860,7 +2019,9 @@ pub const App = struct {
                 fav.shown = "";
                 app.cmd(.{ .gif_favorite = fav });
             },
+            .pasta => |op| app_pastas.handle(app, op),
             .search_messages => |s| app.cmd(.{ .search_messages = s }),
+            .search_members => |q| app.cmd(.{ .search_members = q }),
             // Sem rede (antes do login): o pedido não vai a lugar nenhum.
             .interaction => |ic| if (app.net == .none) @import("core/interaction.zig").freeCmd(std.heap.c_allocator, ic) else app.cmd(.{ .interaction = ic }),
             .join_invite => |code| app.cmd(.{ .join_invite = code }),
@@ -1943,10 +2104,16 @@ pub const App = struct {
                 // As opções do envio que falhou (silenciosa, spoiler…) vão de novo.
                 const sent_as = app.store.outbox.get(r.nonce);
                 const fopts = if (sent_as) |e| envio.dupeFileOpts(ca, e.files) catch &.{} else &.{};
-                app.cmd(.{ .send_message = .{ .channel = r.channel, .content = copy, .nonce = r.nonce, .reply_to = m.msg.reply_to, .files = files, .opts = if (sent_as) |e| e.opts else .{}, .file_opts = fopts } });
+                app.cmd(.{ .send_message = .{ .channel = r.channel, .content = copy, .nonce = r.nonce, .reply_to = m.msg.reply_to, .files = files, .opts = if (sent_as) |e| e.opts else .{}, .file_opts = fopts, .strip_metadata = st.settings.strip_metadata } });
                 send_limits.noteSent(&app.store, r.channel, now());
             },
-            .discard_message => |r| app.store.discardPending(r.channel, r.nonce),
+            .discard_message => |r| {
+                // A imagem colada ou editada que não foi era só nossa.
+                if (app.store.pendingByNonce(r.channel, r.nonce)) |m| for (m.msg.attachments) |att| {
+                    if (std.mem.startsWith(u8, att.url, "file://") and types.isPastedFile(att.url[7..])) temporarios.apagar(att.url[7..]);
+                };
+                app.store.discardPending(r.channel, r.nonce);
+            },
             .open_friends => {
                 st.guild = 0;
                 st.friends = true;
@@ -2172,6 +2339,7 @@ pub const App = struct {
                 st.jump_asked = 0;
             },
             .mark_read => |id| app.markReadAction(id),
+            .mark_folder_read => |id| app.markFolderRead(id),
             .channel_seen => |id| app.readChannel(id, false),
             .deco_dismiss => |dd| app.plugins.dismissDeco(dd.run, dd.id),
             .mark_unread => |id| app.markUnreadAction(id),
@@ -2349,9 +2517,10 @@ pub const App = struct {
                 st.focus_input = true;
             },
             .toggle_fullscreen => {
-                const on = c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_FULLSCREEN != 0;
+                const on = app.win.flags() & c.SDL_WINDOW_FULLSCREEN != 0;
                 _ = c.SDL_SetWindowFullscreen(app.win.window, !on);
             },
+            .video_tela_cheia => |on| @import("ui/video.zig").janela(app.win.window, on, now()),
             .open_settings => {
                 st.palette.open = false;
                 st.settings.open = true;
@@ -2369,6 +2538,22 @@ pub const App = struct {
             .remove_upload => |i| if (i < st.uploads.items.len) {
                 dropUpload(st.uploads.items[i]);
                 _ = st.uploads.orderedRemove(i);
+            },
+            .replace_upload => |r| {
+                // Saiu da bandeja enquanto o editor gravava: o PNG novo não serve para nada.
+                if (r.index >= st.uploads.items.len) {
+                    temporarios.apagar(r.path);
+                    return std.heap.c_allocator.free(r.path);
+                }
+                const u = &st.uploads.items[r.index];
+                // A versão anterior, se era nossa (colada, ou de uma edição antes), já foi.
+                if (types.isPastedFile(u.path)) temporarios.apagar(u.path);
+                std.heap.c_allocator.free(u.path);
+                u.path = r.path;
+                u.size = r.size;
+                u.width = r.width;
+                u.height = r.height;
+                u.editavel = true;
             },
             .paste_image => app.pasteImage(),
             .send_recording => |path| app.sendRecording(path),
@@ -2419,6 +2604,7 @@ pub const App = struct {
             .clear_cache => {
                 msg_cache.clearAll(&app.store);
                 busca_local.clear(&app.store);
+                gif_clips.clearAll(&app.images);
                 st.showToast(now(), false, "cache apagado", "cache cleared", .{});
             },
         }
@@ -2437,6 +2623,7 @@ pub const App = struct {
         var reconnected = false;
         var new_session = false;
         for (batch.items) |e| {
+            insp_reg.evento(.event, e);
             // Botões, menus, modais e comandos: o estado é da interface.
             if (e == .interaction) {
                 interact.onEvent(&app.st, &app.store, e.interaction);
@@ -2485,6 +2672,8 @@ pub const App = struct {
             if (e == .voice_ping) app.st.voice_ping_ms = e.voice_ping;
             if (e == .voice_audio) app.voiceAudio(e.voice_audio.mic_ok, e.voice_audio.out_ok);
             if (e == .history) timeline.mark(.historico);
+            // A busca do `@` respondeu: a lista do autocompletar se refaz no próximo quadro.
+            if (e == .member_search) autocomplete.searchReply(e.member_search);
             if (e == .status and e.status == .failed) failed = true;
             if (e == .net_fail and app.login.phase == .connecting) app.login.net_fail = e.net_fail;
             if (e == .status and e.status == .rejected) token_dead = true;
@@ -2608,6 +2797,9 @@ pub const App = struct {
             else => {},
         }
         switch (e) {
+            // A lista dos favoritos que o Store aceitou (a resposta mais nova): os clipes
+            // seguem (o que saiu sai, o que falta entra na fila).
+            .gifs => |g| if (g.favorites and g.ok and g.req == app.store.gif_favorites.req) gif_clips.sync(app.store.gif_favorites.items, &app.images),
             .search_results => |r| @import("ui/search.zig").deliver(r),
             .invite_created => |r| @import("ui/invites.zig").created(r),
             .moderated => |r| @import("ui/moderacao.zig").delivered(st, &app.store, r, now()),
@@ -2652,6 +2844,8 @@ pub const App = struct {
                 if (store_mod.read_debug) std.log.info("leitura: ack do Discord no canal {d}: até {d}, menções {?d}, manual {}", .{ r.channel, r.message, r.mentions, r.manual });
                 if (!cs.info.unread) {
                     st.filtros.clear(&app.store, r.channel);
+                    // Lida em outro aparelho: as notificações daqui também saem.
+                    app_notificacao.lida(r.channel);
                 } else if (r.mentions) |n| st.filtros.setCount(app.gpa, &app.store, r.channel, n);
                 // "Não lida" marcada em outro aparelho, com o canal aberto aqui.
                 if (r.manual and cs.info.unread and st.activeChannel() == r.channel) {
@@ -2659,8 +2853,14 @@ pub const App = struct {
                     cs.divider_seen = false;
                 }
             },
-            // Falar é ter lido: o contador zera junto.
-            .message_create => |m| if (m.author == app.store.me) st.filtros.clear(&app.store, m.channel),
+            // Falar é ter lido: o contador zera junto, e as notificações da conversa saem
+            // (respondida pela notificação, por aqui ou em outro aparelho).
+            .message_create => |m| if (m.author == app.store.me) {
+                st.filtros.clear(&app.store, m.channel);
+                app_notificacao.lida(m.channel);
+            },
+            // Uma resposta pela notificação que o Discord recusou: avisa por outra.
+            .send_failed => |f| app_notificacao.falhou(app, f.channel, f.nonce),
             // Limites de envio: quem mostra é a caixa de texto.
             .my_limits => |l| send_limits.state.applyMember(std.heap.c_allocator, l.guild, l.timeout_until_ms, l.member_flags, now()),
             .account_flags => |f| send_limits.state.user_flags = f,
@@ -2697,11 +2897,13 @@ pub const App = struct {
     }
 
     /// DM ou menção chegando sem a pessoa olhando: a janela pisca na barra
-    /// de tarefas e sai uma notificação do sistema (notify-send).
+    /// de tarefas e sai uma notificação do sistema, com os botões de ler e
+    /// responder (app_notificacao.zig).
     fn notify(app: *App, m: types.Message, cs: *const @import("core/store.zig").ChannelState) void {
-        if (app.opts.qa or app.store.demo) return;
+        // O QA liga para conferir o caminho inteiro na demonstração (qa_notificacao.zig).
+        if ((app.opts.qa or app.store.demo) and !app_notificacao.qa_ligado) return;
         const set = &app.st.settings;
-        const flags = c.SDL_GetWindowFlags(app.win.window);
+        const flags = app.win.flags();
         const hidden = flags & c.SDL_WINDOW_HIDDEN != 0;
         const focused = app.windowFocused();
         if (aviso.seen(focused, app.st.activeChannel() == m.channel)) return;
@@ -2721,7 +2923,7 @@ pub const App = struct {
         while (cut > 0 and cut < body_src.len and (body_src[cut] & 0xC0) == 0x80) cut -= 1;
         var bb: [208]u8 = undefined;
         const body = std.fmt.bufPrintSentinel(&bb, "{s}{s}", .{ body_src[0..cut], if (cut < body_src.len) "…" else "" }, 0) catch return;
-        app.desktopNotify(title, body);
+        app_notificacao.mensagem(app, m, cs, title, body);
     }
 
     /// Achou versão nova. A faixa no topo aparece sozinha (ui/aviso_atualizacao.zig); com
@@ -2736,7 +2938,7 @@ pub const App = struct {
             @memcpy(auto_tried_buf[0..auto_tried_len], v[0..auto_tried_len]);
             updater.install();
         }
-        const flags = c.SDL_GetWindowFlags(app.win.window);
+        const flags = app.win.flags();
         const focused = flags & c.SDL_WINDOW_HIDDEN == 0 and flags & c.SDL_WINDOW_INPUT_FOCUS != 0;
         if (focused or !app.st.settings.desktop_notifs or app.opts.qa) return;
         var bb: [160]u8 = undefined;
@@ -2750,7 +2952,7 @@ pub const App = struct {
     /// A janela está à frente, com o foco? Escondida na bandeja não conta. O QA
     /// e os prints rodam fora da tela, sem foco de verdade: lá vale `qa_blur`.
     fn windowFocused(app: *App) bool {
-        const flags = c.SDL_GetWindowFlags(app.win.window);
+        const flags = app.win.flags();
         if (flags & c.SDL_WINDOW_HIDDEN != 0) return false;
         if (app.opts.qa or app.opts.shot != null) return !app.qa_blur;
         return flags & c.SDL_WINDOW_INPUT_FOCUS != 0;
@@ -2776,11 +2978,10 @@ pub const App = struct {
         voz_audio.play(.message);
     }
 
-    /// Uma notificação do sistema: notify-send no Linux, o aviso da bandeja no Windows,
-    /// o `display notification` do AppleScript no macOS.
+    /// Uma notificação do sistema sem os botões de mensagem (lembrete, chamada, versão
+    /// nova, plugin): o clique traz a janela (app_notificacao.zig).
     pub fn desktopNotify(app: *App, title: [:0]const u8, body: [:0]const u8) void {
         if (app.notifiers.items.len >= 8) return;
-        if (sys.windows) return sys.toast(c.SDL_GetPointerProperty(c.SDL_GetWindowProperties(app.win.window), c.SDL_PROP_WINDOW_WIN32_HWND_POINTER, null), now(), title, body);
         if (sys.macos) {
             // Título e texto como argumentos do script, nunca dentro dele.
             var mac_args = [_:null]?[*:0]const u8{ "/usr/bin/osascript", "-e", "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run", "--", title.ptr, body.ptr };
@@ -2788,10 +2989,7 @@ pub const App = struct {
             app.notifiers.append(app.gpa, mac_proc) catch c.SDL_DestroyProcess(mac_proc);
             return;
         }
-        // O ícone pelo nome: o do mascote escolhido (ver applyMascot e icone_sistema).
-        var args = [_:null]?[*:0]const u8{ "notify-send", "--app-name=larperCord", "--icon=larpercord", "--", title.ptr, body.ptr };
-        const proc = c.SDL_CreateProcess(@ptrCast(&args), false) orelse return;
-        app.notifiers.append(app.gpa, proc) catch c.SDL_DestroyProcess(proc);
+        app_notificacao.simples(app, title, body);
     }
 
     /// Recolhe os notify-send que já terminaram (sem deixar processo zumbi).
@@ -2935,6 +3133,7 @@ pub const App = struct {
         // disco" desligado não lê nada.
         msg_cache.enabled = app.st.settings.message_cache;
         msg_cache.setAccount(acct);
+        gif_clips.setAccount(acct);
         var arena = std.heap.ArenaAllocator.init(app.gpa);
         defer arena.deinit();
         const snap = state_cache.load(arena.allocator()) orelse return false;
@@ -3186,6 +3385,10 @@ pub const App = struct {
                 break;
             }
             if (app.pumpPortals()) pending = 3;
+            // O controle de fora segue a opção, e quem está no `watch` recebe o que a
+            // volta anterior (eventos e quadro) mudou, antes de o laço dormir.
+            app_ctl.sync(app);
+            app_ctl.notify(app);
             var e: c.SDL_Event = undefined;
             // O relógio do sistema andou para trás: sem isso, o quadro adiado
             // só viria quando ele alcançasse a hora antiga.
@@ -3193,7 +3396,7 @@ pub const App = struct {
             // Janela minimizada ou coberta: ninguém vê. Os eventos da rede são
             // tratados; ao voltar, o SDL avisa e o quadro sai certo.
             const hidden_flags = c.SDL_WINDOW_MINIMIZED | c.SDL_WINDOW_HIDDEN | c.SDL_WINDOW_OCCLUDED;
-            const unseen = c.SDL_GetWindowFlags(app.win.window) & hidden_flags != 0 and !app.opts.qa and app.opts.shot == null and !bench and record_dir == null;
+            const unseen = app.win.flags() & hidden_flags != 0 and !app.opts.qa and app.opts.shot == null and !bench and record_dir == null;
             // A tela de login anima sem parar: no máximo 60 quadros por segundo.
             const login_anim = app.login.visible() and !unseen;
             if (login_anim and !app.opts.qa and app.opts.shot == null and !bench and record_dir == null) {
@@ -3206,7 +3409,7 @@ pub const App = struct {
                 (login_anim and !app.st.settings.reduce_motion) or app_flutuante.ocupada(app);
             // Dorme até o próximo quadro de um GIF, de uma animação lenta ou
             // do redesenho adiado da rede (o que vier primeiro).
-            var due = @min(@min(app.images.next_frame_ms, anim.next_wake_ms), app.sub_wait.due());
+            var due = @min(@min(app.images.next_frame_ms, anim.next_wake_ms), @min(app.sub_wait.due(), app_pastas.due()));
             if (app.qa_sleep) due = @min(due, last_frame_ms + 250);
             if (bg_dirty) due = @min(due, last_frame_ms + bg_frame_ms);
             if (mouse.wanted()) due = @min(due, last_frame_ms + ritmo.MousePace.interval_ms);
@@ -3254,6 +3457,11 @@ pub const App = struct {
                             // acorda no minuto cheio): o que muda de minuto em minuto já
                             // está na tela. Outro aviso no mesmo tique ainda redesenha.
                             const minute_only = app.minute_tick.swap(false, .acq_rel);
+                            if (app.opts.stats and stats_ram_min >= 0 and @divFloor(now(), 60_000) != stats_ram_min) {
+                                stats_ram_min = @divFloor(now(), 60_000);
+                                var rb: [32]u8 = undefined;
+                                app_memoria.logar(app, std.fmt.bufPrint(&rb, "{d} s", .{@divFloor(c.SDL_GetTicksNS() - app.started_ns, std.time.ns_per_s)}) catch "minuto");
+                            }
                             // A janela flutuante mostra horários e o tempo da call: o minuto que virou.
                             if (@divFloor(now(), 60_000) != @divFloor(app.pip.ultimo_ms, 60_000)) app_flutuante.marcar(app);
                             if (!minute_only or @divFloor(last_frame_ms, 60_000) != @divFloor(now(), 60_000)) pending = @max(pending, 1) else tick_seen = true;
@@ -3341,11 +3549,32 @@ pub const App = struct {
                             app_presenca.gameWake(app);
                             tick_seen = true;
                         },
+                        // Pedidos do `larpercord ctl`: rodam aqui, fora do quadro (valem com
+                        // a janela na bandeja). Só o que mexe na tela pede um.
+                        .ctl => if (app_ctl.pump(app)) {
+                            pending = 3;
+                            app_flutuante.marcar(app);
+                        } else {
+                            tick_seen = true;
+                        },
+                        // Clique, botão ou resposta numa notificação: abrir traz a janela;
+                        // ler e responder não a mostram e mudam a tela como a rede muda.
+                        .notificacao => if (app_notificacao.pedidos(app)) {
+                            app.gate.redraw();
+                            pending = 3;
+                        } else {
+                            bg_dirty = true;
+                        },
                     }
                 } else if (app_flutuante.owns(app, &e)) {
                     // Da janela flutuante: vai para o contexto dela (nunca fecha o app nem
                     // vai para a bandeja, e não pede quadro da principal).
                     app_flutuante.onEvent(app, &e);
+                } else if (app.win.window == null) {
+                    // Na bandeja, sem janela nem os backends do ImGui: só o que não é dela
+                    // (o layout do teclado do aperte para falar) e o sair.
+                    _ = voz_audio.onSdlEvent(&e);
+                    if (e.type == c.SDL_EVENT_QUIT) running = false;
                 } else {
                     // Sem botão apertado, passar por cima das coisas pode esperar o
                     // próximo quadro (o ImGui guarda onde o mouse está).
@@ -3359,6 +3588,13 @@ pub const App = struct {
                     // não vale mais, mesmo que o próximo quadro saia igual.
                     if ((e.type >= c.SDL_EVENT_WINDOW_FIRST and e.type <= c.SDL_EVENT_WINDOW_LAST) or
                         e.type == c.SDL_EVENT_RENDER_TARGETS_RESET or e.type == c.SDL_EVENT_RENDER_DEVICE_RESET) app.gate.redraw();
+                    // O desenho guardado nas texturas das camadas se perdeu junto.
+                    if (e.type == c.SDL_EVENT_RENDER_TARGETS_RESET or e.type == c.SDL_EVENT_RENDER_DEVICE_RESET) @import("ui/camada.zig").invalidate();
+                    // Escolhendo um elemento no Inspetor: o clique escolhe e não chega ao app.
+                    if (inspetor.takeEvent(&e)) {
+                        got = c.SDL_PollEvent(&e);
+                        continue;
+                    }
                     // Com a lista do autocompletar aberta, setas, Tab, Enter e Esc são dela.
                     const for_list = e.type == c.SDL_EVENT_KEY_DOWN and autocomplete.takeSdlKey(e.key.key, e.key.mod);
                     // The mouse comes in window pixels; ImGui works in points (see NewFrame).
@@ -3382,6 +3618,12 @@ pub const App = struct {
                     // Arquivo arrastado para a janela: vai para a bandeja (e o mascote do canto come).
                     if (e.type == c.SDL_EVENT_DROP_POSITION) @import("ui/mascote_pet.zig").onDragOver(now());
                     if (e.type == c.SDL_EVENT_WINDOW_RESIZED) @import("ui/mascote_pet.zig").onResize();
+                    // O lugar e o tamanho para a janela voltar igual da bandeja.
+                    if (e.type == c.SDL_EVENT_WINDOW_RESIZED or e.type == c.SDL_EVENT_WINDOW_MOVED or e.type == c.SDL_EVENT_WINDOW_MAXIMIZED or
+                        e.type == c.SDL_EVENT_WINDOW_RESTORED or e.type == c.SDL_EVENT_WINDOW_ENTER_FULLSCREEN or e.type == c.SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) app.win.remember();
+                    // A tela cheia do vídeo acompanha a da janela (saiu por fora, ele sai junto).
+                    if (e.type == c.SDL_EVENT_WINDOW_ENTER_FULLSCREEN or e.type == c.SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
+                        @import("ui/video.zig").janelaEvento(e.type == c.SDL_EVENT_WINDOW_ENTER_FULLSCREEN);
                     if (e.type == c.SDL_EVENT_DROP_FILE and app.store.ready and app.st.activeChannel() != null) {
                         // Solta em cima do mascote, uma imagem vira um quadro na mão dele (e vai
                         // para a bandeja do mesmo jeito). O ponto vem em pixels da janela.
@@ -3402,6 +3644,18 @@ pub const App = struct {
                 got = c.SDL_PollEvent(&e);
             }
             if (input) pending = 3;
+            // Saindo da tela cheia do vídeo: a janela que era maximizada volta maximizada.
+            @import("ui/video.zig").janelaTick(app.win.window, now());
+            // Na bandeja e sem a janela flutuante: a parte da GPU sai (ver `releaseGpu`). Com
+            // ela aberta, fica (ela desenha com o renderizador e as imagens da principal), e
+            // sai quando ela fechar.
+            if (app.in_tray and running and app.win.window != null and !app_flutuante.aberta(app) and !app.restart_wanted and app.opts.shot == null) app.releaseGpu();
+            // O robô do Inspetor (clicar e digitar pelo Console ou pelo ctl), um quadro pedido
+            // para gravar, ou algo novo nas listas com a janela dele aberta.
+            // Um `ctl inspect` esperando quadro também (e o que passou do prazo é respondido).
+            app_ctl.inspectPump(app, false);
+            if (insp_cmd.busy() or inspetor.quadros_pedidos > 0 or app_ctl.inspectWaiting()) pending = @max(pending, 2);
+            if (inspetor.listsChanged()) bg_dirty = true;
             // Venceu um lembrete: o aviso (e, sem ninguém olhando, a notificação). Antes de
             // olhar se a janela está escondida: na bandeja, a notificação sai assim mesmo.
             if (app_lembretes.check(app)) pending = @max(pending, 2);
@@ -3416,15 +3670,17 @@ pub const App = struct {
             }
             if (app.notifiers.items.len > 0) app.reapNotifiers();
             app.flushSubscribe();
+            app_pastas.pump(app);
             app.applyMascot();
             app.loginAfterReady();
             if (running) app.syncTray();
 
-            app.images.now_ms = now();
+            app.images.now_ms = images.clockMs(now());
             if (app.images.pump()) {
                 bg_dirty = true;
                 app_flutuante.marcar(app);
             }
+            if (gif_clips.pump(&app.images, &app.store)) bg_dirty = true;
             if (app.images.takeCopied()) |ok| {
                 if (ok) app.st.showToast(now(), false, "imagem copiada", "image copied", .{}) else app.st.showToast(now(), true, "não deu para copiar a imagem", "couldn't copy the image", .{});
             }
@@ -3468,8 +3724,11 @@ pub const App = struct {
                 if (!app_flutuante.talvez(app, now_ms)) continue;
                 pending = 2;
             }
-            const win_flags = c.SDL_GetWindowFlags(app.win.window);
-            if (win_flags & hidden_flags != 0 and running and !app.opts.qa and app.opts.shot == null and !bench and record_dir == null) {
+            const win_flags = app.win.flags();
+            // Sem janela (na bandeja, `releaseGpu`) nunca há quadro, nem no QA: o robô anda
+            // aqui mesmo, sem desenhar.
+            const released = app.win.window == null;
+            if (released or (win_flags & hidden_flags != 0 and running and !app.opts.qa and app.opts.shot == null and !bench and record_dir == null)) {
                 bg_dirty = false;
                 pending = 0;
                 was_active = false;
@@ -3494,6 +3753,11 @@ pub const App = struct {
                     }
                 }
                 _ = app_flutuante.talvez(app, now_ms);
+                if (released and app.opts.qa) {
+                    if ((app.store.ready or app.store.from_cache) and !runner.tick(app)) running = false;
+                    // O laço do QA não dorme: sem o present, um respiro.
+                    c.SDL_Delay(4);
+                }
                 continue;
             }
             hidden_since_ms = 0;
@@ -3516,7 +3780,7 @@ pub const App = struct {
             anim.next_wake_ms = std.math.maxInt(i64);
             anim.clock_wake_ms = std.math.maxInt(i64);
             app.images.next_frame_ms = std.math.maxInt(i64);
-            app.images.drawn_ms = now_ms;
+            app.images.drawn_ms = images.clockMs(now_ms);
             const t0 = c.SDL_GetTicksNS();
             anim.dt = std.math.clamp(@as(f32, @floatFromInt(t0 - last)) / 1e9, 0.001, 1.0 / 30.0);
             last = t0;
@@ -3552,7 +3816,7 @@ pub const App = struct {
             if (app.opts.qa) runner.holdMouse(app);
             // Janela em foco? (Confirmar leitura depende disso; o QA e os prints
             // rodam fora da tela, sem foco de verdade.)
-            app.st.window_focused = if (app.opts.qa or app.opts.shot != null) !app.qa_blur else c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_INPUT_FOCUS != 0;
+            app.st.window_focused = if (app.opts.qa or app.opts.shot != null) !app.qa_blur else app.win.flags() & c.SDL_WINDOW_INPUT_FOCUS != 0;
             // Configurações que valem para o quadro inteiro.
             const set = &app.st.settings;
             // Claro/escuro (inclusive quando o sistema troca, no modo "seguir").
@@ -3622,7 +3886,10 @@ pub const App = struct {
             // quem desenha outra caixa (ou nenhuma) deixa isto desligado.
             ime.composer_active = false;
             if (app.store.ready and (app.opts.stats or app.opts.shot != null)) app.scene(settled_frames >= 3);
+            insp_cmd.feed(app.io);
+            insp_cap.beginFrame(inspetor.wantsCapture(), app.st.theme_gen);
             c.ImGui_NewFrame();
+            insp_cap.afterNewFrame();
             qa_mod.beginFrame();
             // (O login por cima da conta aberta, ao adicionar outra, cobre tudo.)
             if (usable and app.login.phase != .form) {
@@ -3653,6 +3920,7 @@ pub const App = struct {
                 // As miniaturas de tema só existem para a página de Configurações.
                 if (app.st.settings.open) app.themes.ensurePreviews();
                 root.frame(&ctx, &app.placed, app.themes.previews.items);
+                inspetor.frame(&ctx, app);
                 plugin_host.pollKeys(app);
                 // Um clique pode ter mexido no Store direto (marcar como não lida
                 // pelo menu): a caixa de entrada confere no próximo quadro.
@@ -3685,6 +3953,10 @@ pub const App = struct {
             const tr0 = c.SDL_GetTicksNS();
             c.ImGui_Render();
             if (app.opts.stats) prof_render += (c.SDL_GetTicksNS() - tr0) / 1000;
+            {
+                const vp = c.ImGui_GetMainViewport();
+                insp_cap.endFrame(app.io.*.MousePos, .{ .x = vp.*.Pos.x, .y = vp.*.Pos.y, .w = vp.*.Size.x, .h = vp.*.Size.y });
+            }
 
             const r = app.win.renderer;
             const bg = app.themes.theme_().c(.bg);
@@ -3728,6 +4000,10 @@ pub const App = struct {
             if (show) c.cImGui_ImplSDLRenderer3_RenderDrawData(draw_data, r);
             if (app.opts.stats) prof_gpu += (c.SDL_GetTicksNS() - tg0) / 1000;
             app.stats.frame_us = @intCast((c.SDL_GetTicksNS() - t0) / 1000);
+            // O print pedido pelo Inspetor (comando shot), com o quadro já desenhado.
+            insp_cmd.afterRender(app);
+            app_ctl.inspectPump(app, true);
+            if (inspetor.aberto()) @import("inspect/aba_desempenho.zig").sample(app, app.stats.frame_us, show, now());
 
             if (login_result) |lr| {
                 login_result = null;
@@ -3795,7 +4071,14 @@ pub const App = struct {
                     std.log.info("primeiro quadro em {d} ms", .{(c.SDL_GetTicksNS() - app.started_ns) / 1_000_000});
                 }
                 if (!app.login.visible() and (app.store.ready or app.store.from_cache)) timeline.mark(.login_fora);
-                if (timeline.isMarked(.login_fora) and timeline.isMarked(.historico)) timeline.report();
+                if (timeline.isMarked(.login_fora) and timeline.isMarked(.historico)) {
+                    timeline.report();
+                    // --stats: a RAM por partes quando a abertura acaba, e depois a cada minuto.
+                    if (app.opts.stats and stats_ram_min < 0) {
+                        stats_ram_min = @divFloor(now(), 60_000);
+                        app_memoria.logar(app, "abertura");
+                    }
+                }
             }
             if (record_dir) |dir| if (app.login.visible()) {
                 var pbuf: [512]u8 = undefined;
@@ -3887,13 +4170,14 @@ pub const App = struct {
                         wl.pending = @max(wl.pending, 2);
                     },
                     .quit => return false,
-                    .theme, .token, .show, .toggle, .tray_gone, .mascot, .portal => {},
+                    .theme, .token, .show, .toggle, .tray_gone, .mascot, .portal, .jogo, .ctl, .notificacao => {},
                 }
                 continue;
             }
             input = true;
             if ((e.type >= c.SDL_EVENT_WINDOW_FIRST and e.type <= c.SDL_EVENT_WINDOW_LAST) or
                 e.type == c.SDL_EVENT_RENDER_TARGETS_RESET or e.type == c.SDL_EVENT_RENDER_DEVICE_RESET) app.gate.redraw();
+            if (e.type == c.SDL_EVENT_RENDER_TARGETS_RESET or e.type == c.SDL_EVENT_RENDER_DEVICE_RESET) @import("ui/camada.zig").invalidate();
             const for_list = e.type == c.SDL_EVENT_KEY_DOWN and autocomplete.takeSdlKey(e.key.key, e.key.mod);
             if (e.type == c.SDL_EVENT_MOUSE_MOTION) {
                 const s = app.uiScale();
@@ -3911,11 +4195,13 @@ pub const App = struct {
             if (app.store.expireTyping(now_ms)) wl.pending = 2;
         }
         app.flushSubscribe();
+        app_pastas.pump(app);
         app.applyMascot();
         app.loginAfterReady();
         app.images.now_ms = now_ms;
         if (app.images.pump()) wl.bg_dirty = true;
-        const due = @min(@min(@min(app.images.next_frame_ms, anim.next_wake_ms), app.sub_wait.due()), anim.clock_wake_ms);
+        if (gif_clips.pump(&app.images, &app.store)) wl.bg_dirty = true;
+        const due = @min(@min(@min(app.images.next_frame_ms, anim.next_wake_ms), @min(app.sub_wait.due(), app_pastas.due())), anim.clock_wake_ms);
         if (wl.pending == 0 and !wl.bg_dirty and !wl.was_active and !app.login.visible() and now_ms < due and wl.shot == null) return true;
         wl.bg_dirty = false;
         anim.now_ms = now_ms;
@@ -3948,7 +4234,7 @@ pub const App = struct {
         app.io.*.DisplayFramebufferScale.x *= ui_scale;
         app.io.*.DisplayFramebufferScale.y *= ui_scale;
         app.fonts.setDensity(app.io.*.DisplayFramebufferScale.x);
-        app.st.window_focused = wl.shot != null or c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_INPUT_FOCUS != 0;
+        app.st.window_focused = wl.shot != null or app.win.flags() & c.SDL_WINDOW_INPUT_FOCUS != 0;
         const set = &app.st.settings;
         const mode = app.wantedMode();
         if (mode != app.themes.mode) {

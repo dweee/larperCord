@@ -53,6 +53,7 @@ const types = @import("../core/types.zig");
 const props = @import("mascote_props.zig");
 const i18n = @import("i18n.zig");
 const camada = @import("camada.zig");
+const carimbo = @import("carimbo.zig");
 const reacoes = @import("mascote_reacoes.zig");
 
 const Rgba = d.Rgba;
@@ -2222,12 +2223,12 @@ pub fn draw(ctx: *d.Ctx) void {
         cl.alpha = pl.alpha * (1 - f) * 0.8;
         cl.flames = 0;
         cl.smoke_t = -1;
-        petLayered(ctx, dl, &layers[1], cx + contas.outCubic(f) * size * 0.95, cy - @sin(std.math.pi * f) * size * 0.15, dsize, cl);
+        petLayered(ctx, dl, 1, cx + contas.outCubic(f) * size * 0.95, cy - @sin(std.math.pi * f) * size * 0.15, dsize, cl);
     }
     switch (kind) {
         .terminal => {
             drawn = .{ cx, cy, dsize };
-            petLayered(ctx, dl, &layers[0], cx, cy, dsize, pl);
+            petLayered(ctx, dl, 0, cx, cy, dsize, pl);
         },
         .classico => {
             var pose: logo.Pose = .{ .glow = 0.3, .look = pl.look };
@@ -2255,7 +2256,7 @@ pub fn draw(ctx: *d.Ctx) void {
             cl.mouth = 0;
             cl.face = .happy;
             const m = terminal.petPoint(cx, cy, dsize, 64, 70 + terminal.look.mouthDy());
-            petLayered(ctx, dl, &layers[1], m.x + contas.outCubic(f) * size * 0.9, m.y - @sin(std.math.pi * f) * size * 0.6, dsize * (0.25 + 0.45 * f), cl);
+            petLayered(ctx, dl, 1, m.x + contas.outCubic(f) * size * 0.9, m.y - @sin(std.math.pi * f) * size * 0.6, dsize * (0.25 + 0.45 * f), cl);
         }
     }
     if (cut > 0) c.ImDrawList_PopClipRect(dl);
@@ -2599,23 +2600,60 @@ pub const ghost_alpha: f32 = 0.45;
 
 /// As camadas do mascote meio transparente: a dele e a do clone.
 var layers: [2]camada.Layer = .{ .{}, .{} };
+/// O desenho dele (e o do clone) parado, para repetir sem refazer, e o resumo do quadro
+/// de antes de cada um.
+var stamps: [2]carimbo.Carimbo = .{ .{}, .{} };
+var last_key: [2]u64 = .{ 0, 0 };
+/// QA: desenha de novo a cada quadro, sem repetir (os pixels têm que sair iguais).
+pub var qa_redraw = false;
 /// Onde o Terminal do canto saiu no último quadro (centro e tamanho): o QA confere os
 /// pixels do invisível.
 var drawn: [3]f32 = .{ 0, 0, 0 };
 pub fn qaDrawn() [3]f32 {
     return drawn;
 }
+/// Quantas vezes o desenho dele foi repetido sem refazer (opaco e invisível).
+pub fn qaRepeats() u64 {
+    return stamps[0].hits + layers[0].hits;
+}
+/// A textura do invisível está pronta, no renderizador `r`.
+pub fn qaGhostTexture(r: ?*c.SDL_Renderer) bool {
+    return r != null and layers[0].valid and layers[0].tex != null and layers[0].renderer == r;
+}
 
-/// O Terminal do canto. Meio transparente (invisível, o clone sumindo), ele vai inteiro
-/// para uma camada e some por igual: com o alpha em cada peça, as orelhas, o chapéu e as
-/// pontas dos traços apareciam através do corpo, e as orelhas viravam um par de óculos.
-fn petLayered(ctx: *d.Ctx, dl: *c.ImDrawList, layer: *camada.Layer, cx: f32, cy: f32, size: f32, pl: terminal.PetLook) void {
-    if (pl.alpha >= 0.999) return terminal.pet(dl, cx, cy, size, pl);
+/// O Terminal do canto. Parado, o desenho do quadro anterior se repete (o resumo de tudo
+/// o que o desenho lê não mudou): o corpo cheio de curvas, as orelhas e o rosto não são
+/// refeitos a cada quadro em que outra coisa anima (um GIF, o "digitando…"). Mexendo
+/// (o resumo mudou desde o quadro anterior), ele é desenhado direto, como sempre; no
+/// primeiro quadro parado, o desenho fica guardado. O que se repete são os vértices
+/// (ui/carimbo.zig), não uma textura: a borda suavizada misturada numa textura e depois
+/// na tela arredonda diferente de misturada direto na tela, e o quadro tem que sair igual.
+/// Meio transparente (invisível, o clone sumindo), ele vai inteiro para uma camada e some
+/// por igual: com o alpha em cada peça, as orelhas, o chapéu e as pontas dos traços
+/// apareciam através do corpo, e as orelhas viravam um par de óculos. Aí a textura da
+/// camada é que se repete (ela já era o caminho do invisível).
+fn petLayered(ctx: *d.Ctx, dl: *c.ImDrawList, i: usize, cx: f32, cy: f32, size: f32, pl: terminal.PetLook) void {
+    var h = std.hash.Wyhash.init(0);
+    carimbo.listKey(&h, dl);
+    terminal.petKey(&h, cx, cy, size, pl);
+    const key = h.final();
+    const steady = key == last_key[i] and !qa_redraw;
+    last_key[i] = key;
+    if (pl.alpha >= 0.999) {
+        const st = &stamps[i];
+        if (!qa_redraw and st.again(dl, key)) return;
+        const into = (if (steady) st.begin(dl) else null) orelse return terminal.pet(dl, cx, cy, size, pl);
+        terminal.pet(into, cx, cy, size, pl);
+        st.end(dl, key);
+        return;
+    }
+    const layer = &layers[i];
+    if (!qa_redraw and layer.reuse(dl, ctx.images.renderer, key, pl.alpha)) return;
     const into = layer.begin(dl, ctx.images.renderer) orelse return terminal.pet(dl, cx, cy, size, pl);
     var solid = pl;
     solid.alpha = 1;
     terminal.pet(into, cx, cy, size, solid);
-    layer.end(dl, pl.alpha);
+    layer.end(dl, pl.alpha, key);
 }
 
 /// O corpo para o que fica na boca (a bola de chiclete): acompanha a boca do Terminal

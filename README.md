@@ -89,6 +89,9 @@ The official client is a whole browser dressed up as an app. On the same PC:
 - **Sending options**: choose whether a reply pings its author, send silently (`@silent`), without link
   previews or without pinging anyone, and mark each file as a spoiler or give it alt text. Vote in
   polls and see who voted, see who reacted, and page through more than 50 pins.
+- **Private pictures**: photos and videos go without their location and camera details (Settings → Privacy,
+  on by default; the file on your computer isn't touched), and an image in the tray can be cropped or have
+  parts hidden with big pixel blocks or a black bar before it's sent.
 - **Channel tabs**, a command palette with fuzzy search (`Ctrl+K` / `Ctrl+Shift+P`: channels, DMs,
   servers, themes, status, mark as read and the toggles), keyboard shortcuts and optional
   vim-style navigation (`j`/`k`, `gg`/`G`, `J`/`K` switches channel, `/` searches).
@@ -101,6 +104,8 @@ The official client is a whole browser dressed up as an app. On the same PC:
 - **Voice settings.** In Settings → Voice you pick the microphone and output (remembered by name, back to the default if they disappear, switchable mid-call), adjust volumes, see the mic level live and use "Test microphone" to hear yourself. Voice activity has an adjustable threshold on the meter or an automatic mode that learns your background noise. "Push to talk" takes a key or mouse button and works while the window is focused (SDL has no portable global shortcut). There's a high-pass against rumble, a noise gate and a sound for each call event (joining, leaving, someone else joining or leaving, mute, deafen, the ringtone), built-in or your own WAV or Ogg Opus file, each of which can be turned off. A new message sound plays for DMs and mentions when you're not looking at the conversation (not for muted ones, nor in Do Not Disturb), with its switch in Settings → Notifications. The voice panel shows ping, quality by color and when you're transmitting, and warns you if the mic doesn't open or if the server muted or deafened you. Other people's mute and deafen show in the call list.
 - **Runs on Linux and Windows.** Linux prefers native Wayland in a Wayland session, with X11 fallback. Windows 10/11 builds come from the same code; tokens stay in Credential Manager.
 - **Stays in the tray.** The icon sits in the system tray from launch until you quit, with Open and Quit in its menu even while the window is open, and closing keeps the app connected there. A left click on the icon shows or hides the window. "Close to tray" in Settings → Advanced turns it all off: no icon, and closing quits. Without a tray, closing quits. Opening it a second time brings up the running window. On Linux the tray needs a StatusNotifier panel.
+- **Control from outside.** `larpercord ctl` talks to the running app: mute, deafen, push to talk, show or hide the window, open a channel and read the unread counts, from scripts, a waybar or polybar module or a compositor shortcut, which gives Linux a global push to talk (Hyprland, Sway, KDE, GNOME). Only your user can use it, and Settings → Advanced turns it off. [Guide →](docs/ctl.md)
+- **Reply from the notification.** DM and mention notifications get Mark as read and Reply buttons, and clicking one opens that conversation at the message, even from the tray. Mark as read and an inline reply don't bring the window up, and a reply follows the same rules as the text box (slowmode, permissions, timeouts) and says so when it can't go out. On Linux they go straight over D-Bus: KDE Plasma has the text box in the notification, GNOME has the buttons and Reply opens the conversation ready to reply; without a notification server it falls back to notify-send. On Windows they're real toasts with a text box, falling back to the old balloon. Settings → Notifications → "Reply from the notification".
 - **Updates itself.** Checks when opening or from Settings → Updates. One button downloads, installs and restarts. Updates are signed, and a version without the right signature isn't installed. There's a restart button and a What's new page with the changes in each version.
 - **Video volume.** The in-app player has a volume slider, remembered between runs.
 - **Microphone noise suppression.** Settings → Voice → Noise suppression (Off / RNNoise), on by default and switchable mid-call. It uses [RNNoise](https://github.com/xiph/rnnoise) 0.2 (BSD), built into the executable and running on your computer, with no internet. It reduces steady noise such as fans, hiss and air conditioning; typing and bangs may get through, other voices stay and yours may get a bit muffled. It delays your mic by 20 ms and costs about 2% to 3.5% of a core on a 2011 Core i5 while the mic is open, and less on newer processors; off, muted or with the push-to-talk key released, it costs nothing.
@@ -111,8 +116,9 @@ The official client is a whole browser dressed up as an app. On the same PC:
 - **Your account, synced.** Block, ignore, friend requests (also by username), mute and notification levels, your status with a duration, a custom status and your profile's display name, pronouns and About me are saved to your Discord account, like the official app. Message requests and spam stay apart from your DMs. Rich Presence shows the game you're playing, and games without it (like Dota 2) show up by their running program, from a list you pick; both off by default.
 - **Text in any language.** Arabic letters are joined and right-to-left text comes in the right order ([GNU FriBidi](https://github.com/fribidi/fribidi)). A letter the theme's font lacks, in any script, comes from a system font that has it, looked up only when such text appears.
 - **Code diagnostics (optional).** See errors while typing a code block, from a language server you choose. Off by default, nothing bundled or downloaded. [Guide →](docs/lsp.md)
+- **Inspector (F12).** Developer tools for the app itself: pick anything on screen to see which theme line draws it, its colors by theme name and its contrast; see every request to Discord and every gateway frame (never your token), the log, internal events and the cost of each frame; and drive it from a command line. [Guide →](docs/inspector.md)
 - **Threads and forums.** Active threads nested under the parent channel (collapsible, with unreads), opening as a normal conversation, with tabs, split view, drafts, cache and search; a card with the message count and last activity on the message that started it; create, join, leave, rename, tag, archive and lock threads from the menu, and see archived ones, private ones included. Forums and media channels show the list of posts instead of a conversation, with local search, sorting by activity, pages on demand and "New Post" with title, tags and text. Permissions come from the parent channel, and the member list shows who's in the thread.
-- **Emoji and autocomplete.** Custom emoji show as images (animated too), large when the message is only emoji, and in reactions. PNG, APNG and GIF stickers show as images, and the Stickers tab in the GIF picker sends them. The picker has the full Unicode list, search in Portuguese and English, recents and your servers' emoji, and warns when an emoji needs Nitro. In the text box, `@`, `#`, `:ab` and `/` (slash commands) open a list (arrows, Tab/Enter, Esc or click); names with spaces become real mentions when sent. In data saver mode, custom emoji become `:name:`, with nothing downloaded. To regenerate the table: `tools/gen_emoji.py`.
+- **Emoji and autocomplete.** Custom emoji show as images (animated too), large when the message is only emoji, and in reactions. PNG, APNG and GIF stickers show as images, and the Stickers tab in the GIF picker sends them. The picker has the full Unicode list, search in Portuguese and English, recents and your servers' emoji, and warns when an emoji needs Nitro. In the text box, `@`, `#`, `:ab` and `/` (slash commands) open a list (arrows, Tab/Enter, Esc or click); names with spaces become real mentions when sent. In a big server, `@` also asks Discord for members whose name starts with what you typed, so people who are offline can be mentioned too (after a short pause, within Discord's limit of one member request per server every 30 s). In data saver mode, custom emoji become `:name:`, with nothing downloaded. To regenerate the table: `tools/gen_emoji.py`.
 - **Read state synced with Discord**: unreads and mentions correct on open, `MESSAGE_ACK` from another device clears them here, confirmations like the official client's (at most one per channel every 3 s; none on its own with the window unfocused), "mark as read" per channel and per server, "mark as unread" from a message.
 - **NEW MESSAGES line** with a button that jumps to the first one and "mark as read"; the channel opens at the first unread (you can turn it off in Settings → Chat).
 - **Pinned messages**: a pin in the header, pin and unpin from the menu; jumping to any old message loads around it, with "Jump to present".
@@ -150,8 +156,11 @@ The official client is a whole browser dressed up as an app. On the same PC:
   js/ts, py, rust, go, sh, json, lua…) with a "Copy" button; a preview above the box while you type.
 - **Videos playing in the conversation** (attachments and direct .mp4/.webm links) with **FFmpeg 7, 8
   or 9, if present** (loaded only on the first play, no build dependency): play/pause,
-  progress bar, sound; up to 480p and about 30 fps. Without FFmpeg, the video opens in the browser. On
-  Linux it's your distro's `ffmpeg` package. Windows has none, so Settings → Chat → Videos gets it once
+  progress bar, sound and fullscreen (the button, a double-click or F: the window goes fullscreen,
+  the controls hide while it plays, Space, arrows and M work, Esc puts the window back as it was);
+  up to 480p in the conversation, up to the screen size (at most 1080p) in fullscreen, and about
+  30 fps. Without FFmpeg, the video opens in the browser. On Linux it's your distro's `ffmpeg`
+  package. Windows has none, so Settings → Chat → Videos gets it once
   (Check for FFmpeg, then Download FFmpeg): about 80 MB from github.com/BtbN/FFmpeg-Builds, checked
   against a fixed SHA-256, about 128 MB on disk in `%LOCALAPPDATA%\larpercord\ffmpeg`. "Choose FFmpeg
   folder…" there takes a "shared" FFmpeg build you already have, and when FFmpeg isn't found the page
@@ -162,7 +171,9 @@ The official client is a whole browser dressed up as an app. On the same PC:
   audio files (.mp3, .ogg, .wav, .flac, .m4a…) play in the conversation, with the whole file's waveform
   as the seek bar, 1×/1.5×/2× speed and small bars that dance while it plays (Opus, MP3 and WAV with
   nothing installed, the rest through FFmpeg); long GIFs play every frame, and a star on any GIF adds it
-  to your favorites.
+  to your favorites, whose tab in the GIF picker opens instantly with every GIF playing from a small clip
+  kept in `~/.cache/larpercord/gif-favorites` (`%LOCALAPPDATA%\larpercord\gif-favorites` on Windows;
+  50 MB cap, removed by Clear cache).
 - **Export and save**: right-click a conversation → Export Conversation… writes it as HTML (one page that opens
   offline), Markdown or JSON from what's already on your computer, with nothing requested from Discord.
   Right-click an image, video or file → Save… or Save to Downloads keeps the original file.
@@ -299,12 +310,14 @@ No magic, just many small decisions:
 5. **Markdown is parsed once**, when the message arrives. The UI only lays out the
    spans, with a **height cache per width**.
 6. **A virtualized list**: binary search for the first visible item, then draw only the screen.
-7. **Memory has ceilings**: 1,500 messages per channel and, by default, 2,000 in total (Settings → Performance changes it), with old ones freed. After a
-   minute in the tray or minimized, images leave memory too, except small ones that were on screen.
+7. **Memory has ceilings**: 1,500 messages per channel and, by default, 2,000 in total (Settings → Performance changes it), with old ones freed. A picture
+   not drawn for a minute leaves memory, GIF frames included. In the tray, the window, the renderer (the GPU context) and every texture go away at once
+   and the memory goes back to the system; only small pictures that were on screen stay, as pixels, so the window comes back whole. After a minute
+   minimized, images leave memory too, except those small ones.
 8. **On Linux, fontconfig gets freed** after fonts are resolved (`FcFini` + `malloc_trim`). Windows has
    no fontconfig: fonts are opened straight from `C:\Windows\Fonts`.
 9. **No blinking cursor**: a cursor blinking on its own would keep the CPU awake.
-10. **A lean binary**: a release build without debug symbols. The Linux file is about 16 MB with SDL3, libcurl and OpenSSL inside, built with only the parts the app uses and no exported symbols, and about 10 MB built against the system's copies. On Windows those three come as DLLs next to the `.exe`. The biggest texts inside it (the Japanese and Russian translations, the changelog, the emoji table) go in compressed and only open when needed.
+10. **A lean binary**: a release build without debug symbols. The Linux file is about 16 MB with SDL3, libcurl and OpenSSL inside, built with only the parts the app uses and no exported symbols, and about 10 MB built against the system's copies. On Windows they are inside the single `.exe` too (since 0.6.7). The biggest texts inside it (the Japanese and Russian translations, the changelog, the emoji table) go in compressed and only open when needed.
 
 ## Building
 
@@ -339,6 +352,7 @@ Segoe UI Emoji from `C:\Windows\Fonts`.
 | `zig build test` | tests (KDL, colors, layout, markdown, Store, built-in themes, settings) |
 | `tools/snapshots.sh` | generates the screenshots in `docs/` without opening a window |
 | `tools/membench.sh 60` | measures RAM and CPU for each theme and fails over 60 MB |
+| `tools/ram_conta_grande.sh BIN` | RAM and CPU for a few minutes of use of a fake 52-server, 2,450-channel account, part by part (QA build with `-Dqa=true -Dqa-rede=true`; no account and no network) |
 | `tools/tls_check.sh` | compares the app's TLS and HTTP/2 fingerprint with Chrome's, without a token |
 | `tools/qa_quadros.py BIN [--slow]` | checks frame skipping and hidden-window memory with a real window in Xvfb |
 | `zig build web -Demscripten=DIR` | the browser demo in WebAssembly ([how](tools/web/README.md)) |
@@ -374,7 +388,7 @@ src/
   platform/   window, renderer, "wake the loop"; the only place that knows SDL
 themes/       the built-in themes (also compiled into the binary)
 third_party/  Dear ImGui 1.93 + dear_bindings (C), with a small patch for bitmap emoji; GNU FriBidi;
-              dr_mp3 + dr_wav (audio attachments)
+              dr_mp3 + dr_wav (audio attachments); mimalloc (only with -Dmimalloc=true)
 ```
 
 The flow is **UI → `Action` → app → `Command` → gateway → `Event` → Store → UI**.
@@ -390,7 +404,8 @@ swapping the fake gateway for the real one doesn't touch the UI.
 - [x] Per-channel permissions (a padlock on what you can't read), threads and forums
 - [x] Windows 10/11
 - [x] System tray, signed self-updates and install scripts
-- [ ] Native notifications through D-Bus on Linux
+- [x] Open from the saved servers, channels and messages, then sync when Discord answers
+- [x] Native notifications through D-Bus on Linux
 - [x] Voice (DAVE/MLS + Opus)
 - [x] Calls in DMs and groups
 - [x] Rich Presence: show the game you're playing, off by default
@@ -403,7 +418,6 @@ swapping the fake gateway for the real one doesn't touch the UI.
 
 **Next**
 
-- [ ] Open from the saved servers, channels and messages, then sync when Discord answers
 - [ ] A texture atlas for avatars and emoji
 - [ ] Server and role settings
 - [ ] A better theme editor
@@ -412,5 +426,5 @@ swapping the fake gateway for the real one doesn't touch the UI.
 
 ## License
 
-larperCord is licensed under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). Third-party code keeps its own license, in each folder of `third_party/`: Dear ImGui and dear_bindings are MIT, RNNoise is BSD, GNU FriBidi is LGPL-2.1 or later, dr_mp3 and dr_wav (dr_libs) are public domain or MIT No Attribution. The file
+larperCord is licensed under the [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). Third-party code keeps its own license, in each folder of `third_party/`: Dear ImGui and dear_bindings are MIT, RNNoise is BSD, GNU FriBidi is LGPL-2.1 or later, dr_mp3 and dr_wav (dr_libs) are public domain or MIT No Attribution, mimalloc is MIT. The file
 `third_party/imgui/misc/freetype/imgui_freetype.cpp` has changes marked with `[larperCord]`.

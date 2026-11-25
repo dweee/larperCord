@@ -2908,6 +2908,15 @@ const ops_lsp_quit = [_]Op{expect("pronto", ready)} ++ lsp_ops_quit;
 const qa_bandeja = @import("qa_bandeja.zig");
 const ops_bandeja = [_]Op{expect("pronto", ready)} ++ qa_bandeja.ops;
 const ops_flutuante = [_]Op{expect("pronto", ready)} ++ @import("qa_flutuante.zig").ops;
+/// O controle de fora, `larpercord ctl` (QA_SUITE=ctl, com LARPER_CTL=1).
+const ops_ctl = [_]Op{expect("pronto", ready)} ++ @import("qa_ctl.zig").ops;
+const ops_imagem = [_]Op{expect("pronto", ready)} ++ @import("qa_imagem.zig").ops;
+const ops_imagem_tema = [_]Op{expect("pronto", ready)} ++ @import("qa_imagem.zig").ops_tema;
+const ops_inspetor = [_]Op{expect("pronto", ready)} ++ @import("qa_inspetor.zig").ops;
+const ops_arrastar = [_]Op{expect("pronto", ready)} ++ @import("qa_arrastar.zig").ops;
+const ops_notificacao = [_]Op{expect("pronto", ready)} ++ @import("qa_notificacao.zig").ops;
+const ops_video_tela = [_]Op{expect("pronto", ready)} ++ @import("qa_video_tela.zig").ops;
+const ops_video_tela_tema = [_]Op{expect("pronto", ready)} ++ @import("qa_video_tela.zig").ops_tema;
 const ops_bandeja_sair = [_]Op{ expect("pronto", ready), click("guild:500000") } ++ qa_bandeja.ops_no_tray;
 const ops_bandeja_menu = [_]Op{ expect("pronto", ready), click("guild:500000") } ++ qa_bandeja.ops_quit;
 const ops_bandeja_sair_aberta = [_]Op{ expect("pronto", ready), click("guild:500000") } ++ qa_bandeja.ops_quit_open;
@@ -3306,6 +3315,7 @@ const ops_social = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @impor
 const ops_presenca = [_]Op{expect("carrega e mostra a conversa", ready)} ++ (if (@import("builtin").os.tag != .windows) @import("qa_presenca.zig").ops else [_]Op{}) ++ @import("qa_presenca.zig").ops_jogo;
 const ops_moderacao = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_moderacao.zig").ops;
 const ops_entrada = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_entrada.zig").ops;
+const ops_md_barra = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_mdbarra.zig").ops;
 const ops_proxy = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_proxy.zig").ops;
 const ops_sem_fontes = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_sem_fontes.zig").ops;
 const ops_interacoes = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_interacoes.zig").ops;
@@ -3315,6 +3325,7 @@ const ops_perfil_tema = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @
 const ops_call = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_call.zig").ops;
 const ops_call_tema = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_call.zig").ops_theme;
 const ops_membros = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_membros.zig").ops;
+const ops_busca_membros = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_busca_membros.zig").ops;
 const ops_cache_a = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_cache.zig").ops_a;
 // Sem esperar o READY: o começo é justamente o que aparece antes dele.
 const ops_cache_b = @import("qa_cache.zig").ops_b;
@@ -3340,6 +3351,24 @@ const ops_lembretes = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @im
 const ops_lembretes_a = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_lembretes.zig").ops_a;
 const ops_lembretes_b = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_lembretes.zig").ops_b;
 
+const ops_pastas = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_pastas.zig").ops;
+const ops_pastas_tema = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_pastas.zig").ops_tema;
+const ops_pastas_plana = [_]Op{expect("carrega e mostra a conversa", ready)} ++ @import("qa_pastas.zig").ops_plana;
+/// A rede de verdade contra o Discord de mentira (qa_rede.zig, tools/qa_rede.sh): só no
+/// executável de debug do QA, o único onde o endereço do Discord pode mudar.
+const ops_rede = if (@import("net/enderecos.zig").pode_trocar) @import("qa_rede.zig").ops else [_]Op{
+    s("rede"),
+    expect("o Discord de mentira só existe no executável de debug do QA", soNoDebug),
+};
+fn soNoDebug(_: *App) bool {
+    return false;
+}
+/// A conta grande no mesmo Discord de mentira (qa_conta_grande.zig, tools/ram_conta_grande.sh).
+const ops_conta_grande = if (@import("net/enderecos.zig").pode_trocar) @import("qa_conta_grande.zig").ops else [_]Op{
+    s("conta grande"),
+    expect("o Discord de mentira só existe no executável do QA de debug ou com -Dqa-rede", soNoDebug),
+};
+
 /// As baterias que dá para escolher com QA_SUITE (o nome e o roteiro). Um nome que
 /// não está aqui é erro: antes caía na geral sem avisar e o qa.sh dizia que passou.
 const suites = [_]struct { []const u8, []const Op }{
@@ -3359,6 +3388,14 @@ const suites = [_]struct { []const u8, []const Op }{
     .{ "lsp-quit", &ops_lsp_quit },
     .{ "bandeja", &ops_bandeja },
     .{ "flutuante", &ops_flutuante },
+    .{ "ctl", &ops_ctl },
+    .{ "imagem", &ops_imagem },
+    .{ "imagem-tema", &ops_imagem_tema },
+    .{ "inspetor", &ops_inspetor },
+    .{ "arrastar", &ops_arrastar },
+    .{ "notificacao", &ops_notificacao },
+    .{ "video-tela", &ops_video_tela },
+    .{ "video-tela-tema", &ops_video_tela_tema },
     .{ "bandeja-sair", &ops_bandeja_sair },
     .{ "bandeja-menu", &ops_bandeja_menu },
     .{ "bandeja-sair-aberta", &ops_bandeja_sair_aberta },
@@ -3385,6 +3422,7 @@ const suites = [_]struct { []const u8, []const Op }{
     .{ "presenca", &ops_presenca },
     .{ "moderacao", &ops_moderacao },
     .{ "entrada", &ops_entrada },
+    .{ "md-barra", &ops_md_barra },
     .{ "proxy", &ops_proxy },
     .{ "sem-fontes", &ops_sem_fontes },
     .{ "fontes", &ops_fontes },
@@ -3395,6 +3433,7 @@ const suites = [_]struct { []const u8, []const Op }{
     .{ "call", &ops_call },
     .{ "call-tema", &ops_call_tema },
     .{ "membros", &ops_membros },
+    .{ "busca-membros", &ops_busca_membros },
     .{ "cache-a", &ops_cache_a },
     .{ "cache-b", &ops_cache_b },
     .{ "mascote", &ops_mascote },
@@ -3408,6 +3447,13 @@ const suites = [_]struct { []const u8, []const Op }{
     .{ "lembretes", &ops_lembretes },
     .{ "lembretes-a", &ops_lembretes_a },
     .{ "lembretes-b", &ops_lembretes_b },
+    .{ "pastas", &ops_pastas },
+    .{ "pastas-tema", &ops_pastas_tema },
+    .{ "pastas-plana", &ops_pastas_plana },
+    .{ "rede", &ops_rede },
+    .{ "conta-grande", &ops_conta_grande },
+    .{ "gif-clipes-a", &@import("qa_gif_clipes.zig").ops_a },
+    .{ "gif-clipes-b", &@import("qa_gif_clipes.zig").ops_b },
 };
 
 /// O nome de cada bateria (tools/qa.sh e quem quiser listar: --qa-list).
@@ -3821,8 +3867,9 @@ pub const Runner = struct {
                 }
                 r.pos(app, r.target_pos);
             },
-            1 => c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, true),
-            2 => c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, false),
+            // Escolhendo um elemento no Inspetor, o clique escolhe (como o do mouse de verdade).
+            1 => if (!@import("inspect/ui.zig").robotPress(button)) c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, true),
+            2 => if (!@import("inspect/ui.zig").robotRelease()) c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, false),
             3 => if (double) c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, true),
             4 => if (double) c.ImGuiIO_AddMouseButtonEvent(evIo(app), button, false),
             else => {

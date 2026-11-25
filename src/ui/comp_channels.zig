@@ -12,6 +12,8 @@ const d = @import("draw.zig");
 const qa = @import("qa.zig");
 const anim = @import("anim.zig");
 const w = @import("widgets.zig");
+const arrastar = @import("arrastar_voz.zig");
+const popup = @import("popup.zig");
 const icons = @import("icons.zig");
 const i18n = @import("i18n.zig");
 const types = @import("../core/types.zig");
@@ -34,6 +36,9 @@ pub fn channelList(ctx: *d.Ctx, n: *const kdl.Node, r_in: d.Rect) void {
     var r = r_in;
     if (ctx.st.guild == 0) return dmList(ctx, n, fam, variant, r);
     const g = ctx.store.guild(ctx.st.guild) orelse return;
+    // Arrastar alguém da call para outro canal de voz (ui/arrastar_voz.zig).
+    arrastar.beginList(ctx);
+    defer arrastar.endList(ctx);
 
     // Banner de verdade: a imagem fica atrás do nome e rola com a lista, como
     // no Discord. O nome continua no lugar, com a lista passando por baixo.
@@ -370,7 +375,9 @@ fn row(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, variant: Variant, cs: any
             if (vf.muted()) qa.mark(vr, "voice-flagged:{d}", .{uid});
             if (voiceFlagsTip(vf)) |vt| d.tip(ctx, vr, vt, vh.hovered);
             if (vh.hovered and variant != .tree) d.rect(dl, vr, ctx.col(.hover), ctx.th.radius);
-            if (vh.clicked) ctx.popup(.{ .profile = .{ .user = uid, .x = vr.right() + 8, .y = vr.y } });
+            // Segurar e arrastar move a pessoa de call (com "Mover membros"); só clicar abre o perfil.
+            if (vh.hovered and c.ImGui_IsMouseClicked(0) and popup.movable(ctx, uid) != null) arrastar.press(ctx, uid, ch.guild, ch.id);
+            if (vh.clicked and !arrastar.engoleClique()) ctx.popup(.{ .profile = .{ .user = uid, .x = vr.right() + 8, .y = vr.y } });
             if (vh.right) ctx.popup(.{ .menu = .{ .kind = .user, .id = uid, .x = ctx.mouse.x, .y = ctx.mouse.y } });
             switch (variant) {
                 .tree => {
@@ -394,6 +401,8 @@ fn row(ctx: *d.Ctx, dl: *c.ImDrawList, fam: *d.Family, variant: Variant, cs: any
             }
         }
         if (cs.voice_members.items.len > 0) y2 += 4;
+        // Soltar alguém aqui (o canal e quem já está nele).
+        arrastar.channelTarget(ctx, dl, ch, .{ .x = rr.x, .y = rr.y, .w = rr.w, .h = @max(rr.h, y2 - rr.y - 2) });
     }
     return y2;
 }

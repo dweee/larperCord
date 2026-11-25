@@ -14,7 +14,7 @@ Some items here are how larperCord stays light, and the official app may do simi
 - **[0–0.4% CPU when idle](page:performance#the-numbers).** The app sleeps until a network event, a key or the clock wakes it. ²
 - **[About 14 MB](page:performance#the-numbers)** for the Linux download, in a single file. ³
 - **[Things start when you ask](page:performance#ten-decisions).** The voice thread when you join a call, stopped when you leave, FFmpeg on your first video, and no plugin thread while no plugin is on.
-- **[Hidden means lighter](page:performance#ten-decisions).** After a minute in the tray or minimized, images leave memory, except small ones that were on screen.
+- **[Hidden means lighter](page:performance#ten-decisions).** In the tray, the window, the renderer and every texture go away and the memory goes back to the system; after a minute minimized, images leave memory, except small ones that were on screen.
 - **[Memory limits you set](page:settings#the-pages).** Settings → Performance shows live RAM and where it goes, and sets how much goes to images, each GIF and messages.
 
 ¹ PSS: 125–140 MB in one account's normal use and about 70 MB right after opening, on one PC with Arch Linux, Hyprland, an i5-2400S, a GTX 1050 Ti and a 1280×800 window. About 35 MB of it is the NVIDIA driver, libraries and fonts. Measured on a build that uses the system's libraries; side by side in demo, the published file used about 2 MB more. Yours depends on your servers, members and images.

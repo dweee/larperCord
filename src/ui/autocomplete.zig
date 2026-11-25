@@ -8,6 +8,14 @@
 //!
 //! O que se escolhe entra na caixa com o nome (`@Ana Maria`) e vira a menção de
 //! verdade só na hora de enviar (`Token`, core/mentions.zig).
+//!
+//! Num servidor grande a lista de membros só traz quem está online, então o `@ab`
+//! também pede ao Discord quem começa com aquilo (net/member_search.zig, com os
+//! limites): só num servidor cuja lista não tem todo mundo, com 2 letras ou mais,
+//! quando o que já se conhece não enche a lista, depois de uma pausa na digitação.
+//! Enquanto a resposta não chega, um "buscando no servidor…" parado (sem animação, que
+//! manteria o app acordado); quando chega, a lista se refaz sem a escolha pular para
+//! outra pessoa.
 const std = @import("std");
 const c = @import("c");
 const d = @import("draw.zig");
@@ -22,6 +30,8 @@ const types = @import("../core/types.zig");
 const mentions = @import("../core/mentions.zig");
 const State = @import("state.zig").State;
 const interact = @import("interact.zig");
+const member_search = @import("../net/member_search.zig");
+const Store = @import("../core/store.zig").Store;
 const Id = types.Id;
 
 const Kind = enum { user, role, everyone, here, channel, voice, emoji, custom, command, app_command, suggestion };
@@ -91,6 +101,18 @@ var last_trig_at: usize = 0;
 var dismissed_at: ?usize = null;
 /// Quantas buscas já rodaram (o QA confere que parado não busca nada).
 pub var searches: u32 = 0;
+
+// --- A busca do `@` no servidor inteiro (net/member_search.zig) -----------------
+
+/// A busca que a lista quer agora (null = nenhuma) e a última pedida à rede.
+var want: ?member_search.Query = null;
+var asked: ?member_search.Query = null;
+/// A pedida ainda não teve resposta (o "buscando no servidor…").
+var waiting = false;
+/// Chegaram membros de uma busca: a lista se refaz no próximo quadro.
+var rerun = false;
+/// O que já veio (a mesma conta da rede): o que já veio não é pedido de novo.
+var memo: member_search.Memo = .{};
 
 // --- O que foi escolhido, para virar a menção de verdade ao enviar ------------
 
@@ -196,6 +218,20 @@ fn close() void {
     n_items = 0;
     n_keys = 0;
     list_rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    want = null;
+    rerun = false;
+}
+
+/// A busca no servidor está esperando resposta (o QA confere o aviso).
+pub fn searching() bool {
+    const wq = want orelse return false;
+    const a = asked orelse return false;
+    return waiting and wq.eql(a);
+}
+
+/// Quem está escolhido na lista (0 = nada, ou não é uma pessoa/cargo/canal).
+pub fn selectedId() Id {
+    return if (is_open and sel < n_items) items[sel].id else 0;
 }
 
 // --- Busca --------------------------------------------------------------------
@@ -437,7 +473,7 @@ pub fn update(ctx: *d.Ctx, ch_id: Id, active: bool, box: d.Rect) void {
     // Clicar na lista tira o foco do campo: ela tem que sobreviver a esse quadro.
     const clicking = is_open and c.ImGui_IsMouseDown(0) and list_rect.contains(ctx.mouse.x, ctx.mouse.y);
     if (!active and !clicking and pending_cursor == null) {
-        if (is_open) close();
+        close();
         last_len = std.math.maxInt(usize);
         return;
     }
@@ -451,25 +487,30 @@ pub fn update(ctx: *d.Ctx, ch_id: Id, active: bool, box: d.Rect) void {
             refresh(ctx, ch_id, text, cur);
         }
     }
+    if (rerun) {
+        rerun = false;
+        if (last_trig == '@' and trig_char == '@') rerunKeep(ctx, ch_id);
+    }
     processKeys(ctx);
 }
 
 fn refresh(ctx: *d.Ctx, ch_id: Id, text: []const u8, cur: usize) void {
     const found = pluginTrigger(text, cur) orelse mentions.findTrigger(text, cur);
+    // (Fechar também tira a busca no servidor que a lista queria.)
     const t = found orelse {
         dismissed_at = null;
-        if (is_open) close();
+        close();
         last_trig = 0;
         return;
     };
     if (mentions.insideCode(text, cur)) {
-        if (is_open) close();
+        close();
         last_trig = 0;
         return;
     }
     if (dismissed_at) |at| {
         if (at == t.at) {
-            if (is_open) close();
+            close();
             return;
         }
         dismissed_at = null;
@@ -477,7 +518,7 @@ fn refresh(ctx: *d.Ctx, ch_id: Id, text: []const u8, cur: usize) void {
     const q = text[t.at + 1 .. cur];
     // `:` só abre com 2 letras; nomes curtos demais pegariam qualquer ":)".
     if ((t.ch == ':' and q.len < 2) or q.len > last_query.len) {
-        if (is_open) close();
+        close();
         last_trig = 0;
         return;
     }
@@ -491,8 +532,78 @@ fn refresh(ctx: *d.Ctx, ch_id: Id, text: []const u8, cur: usize) void {
     last_query_len = q.len;
     searches +%= 1;
     runSearch(ctx, ch_id, q, t.ch);
+    want = if (t.ch == '@') wanted(ctx, ch_id, q) else null;
     sel = 0;
     top = 0;
+    is_open = n_items > 0;
+}
+
+/// A busca do `@` no servidor inteiro vale a pena agora? Num servidor (nunca DM ou
+/// grupo), com 2 letras ou mais, quando o que já se conhece não enche a lista, a lista de
+/// membros do servidor não tem todo mundo e nada do que já veio cobre o texto.
+fn wanted(ctx: *d.Ctx, ch_id: Id, q: []const u8) ?member_search.Query {
+    if (n_items >= visible_rows) return null;
+    const cs = ctx.store.channel(ch_id) orelse return null;
+    const mq = member_search.make(cs.info.guild, q) orelse return null;
+    if (memo.covers(mq) or everyoneKnown(ctx.store, cs.info.guild)) return null;
+    return mq;
+}
+
+/// A lista de membros do servidor já tem todo mundo que vê o canal (servidor pequeno):
+/// buscar não traria ninguém novo.
+fn everyoneKnown(store: *const Store, guild: Id) bool {
+    const ml = store.memberList(guild) orelse return false;
+    if (!ml.synced or ml.total == 0) return false;
+    var n: u32 = 0;
+    for (ml.items.items) |it| {
+        if (it == .member) n += 1;
+    }
+    return n >= ml.total;
+}
+
+/// A resposta de uma busca no servidor (o app chama com cada `member_search`).
+pub fn searchReply(r: member_search.Reply) void {
+    if (r.result == .answered) {
+        memo.note(r.q, r.found);
+        // Quem veio (mesmo de uma busca anterior) pode entrar na lista aberta.
+        rerun = true;
+    }
+    const a = asked orelse return;
+    if (!a.eql(r.q)) return;
+    waiting = false;
+    if (r.result == .covered) rerun = true;
+}
+
+/// Conta à rede a busca que a lista quer (uma vez por mudança): uma nova entra no lugar
+/// da que esperava, e nenhuma cancela a que ainda esperava.
+fn syncSearch(ctx: *d.Ctx) void {
+    if (want) |wq| {
+        if (asked) |a| if (a.eql(wq)) return;
+        ctx.act(.{ .search_members = wq });
+        asked = wq;
+        waiting = true;
+        return;
+    }
+    const a = asked orelse return;
+    asked = null;
+    if (waiting) ctx.act(.{ .search_members = .{ .guild = a.guild } });
+    waiting = false;
+}
+
+/// Chegaram membros da busca no servidor: refaz a lista com eles sem a escolha pular
+/// para outra pessoa (quem estava escolhido continua, na mesma linha se der).
+fn rerunKeep(ctx: *d.Ctx, ch_id: Id) void {
+    const had: ?Item = if (is_open and sel < n_items) items[sel] else null;
+    const row = sel -| top;
+    const q = last_query[0..last_query_len];
+    runSearch(ctx, ch_id, q, '@');
+    want = wanted(ctx, ch_id, q);
+    sel = 0;
+    if (had) |h| for (items[0..n_items], 0..) |*x, i| if (x.kind == h.kind and x.id == h.id and x.uni == h.uni) {
+        sel = i;
+        break;
+    };
+    top = @min(sel -| row, n_items -| visible_rows);
     is_open = n_items > 0;
 }
 
@@ -626,11 +737,44 @@ fn title() []const u8 {
     };
 }
 
+fn searchingText() []const u8 {
+    return i18n.tr("buscando no servidor…", "searching the server…");
+}
+
+/// Sem nada daqui para mostrar ainda: só o título e o aviso, parados (não pega o mouse).
+fn drawSearching(ctx: *d.Ctx) void {
+    const h = head_h + 30;
+    const r: d.Rect = .{ .x = anchor.x, .y = anchor.y - h - 6, .w = anchor.w, .h = h };
+    const pad: f32 = 14;
+    const outer = r.inset(-pad, -pad);
+    c.ImGui_SetCursorScreenPos(d.v(outer.x, outer.y));
+    _ = c.ImGui_BeginChild("##autocomplete-busca", d.v(outer.w, outer.h), 0, c.ImGuiWindowFlags_NoBackground | c.ImGuiWindowFlags_NoScrollbar | c.ImGuiWindowFlags_NoScrollWithMouse | c.ImGuiWindowFlags_NoNav | c.ImGuiWindowFlags_NoInputs);
+    defer c.ImGui_EndChild();
+    const dl = c.ImGui_GetWindowDrawList();
+    const radius = @max(ctx.th.radius + 2, 6);
+    d.shadow(dl, r, radius, 12, ctx.col(.shadow));
+    d.rect(dl, r, ctx.col(.overlay), radius);
+    d.border(dl, r, ctx.col(.border), radius, 1);
+    d.text(dl, ctx.ui.get(.bold), 11, r.x + 14, r.y + 8, ctx.col(.muted), title());
+    d.text(dl, ctx.ui.get(.regular), 13, r.x + 14, r.y + head_h + 4, ctx.col(.faint), searchingText());
+    qa.mark(r, "ac-searching", .{});
+}
+
 /// Desenhada no fim do quadro principal, por cima da conversa.
 pub fn draw(ctx: *d.Ctx) void {
-    if (!seen and is_open) close();
+    // Sem a caixa de texto neste quadro: a lista e a busca no servidor acabam.
+    if (!seen) {
+        if (is_open) close();
+        want = null;
+    }
+    const drawn = seen;
     seen = false;
-    if (!is_open or n_items == 0) return;
+    syncSearch(ctx);
+    if (!drawn) return;
+    if (!is_open or n_items == 0) {
+        if (searching()) drawSearching(ctx);
+        return;
+    }
     const shown = @min(n_items, visible_rows);
     const h = head_h + @as(f32, @floatFromInt(shown)) * row_h + 8;
     const r: d.Rect = .{ .x = anchor.x, .y = anchor.y - h - 6, .w = anchor.w, .h = h };
@@ -648,6 +792,12 @@ pub fn draw(ctx: *d.Ctx) void {
     d.border(dl, r, ctx.col(.border), radius, 1);
     qa.mark(r, "autocomplete", .{});
     d.text(dl, ctx.ui.get(.bold), 11, r.x + 14, r.y + 8, ctx.col(.muted), title());
+    if (searching()) {
+        const txt = searchingText();
+        const tw = d.width(ctx.ui.get(.regular), 11, txt);
+        d.text(dl, ctx.ui.get(.regular), 11, r.right() - tw - 14, r.y + 8, ctx.col(.faint), txt);
+        qa.mark(.{ .x = r.right() - tw - 14, .y = r.y + 4, .w = tw, .h = 18 }, "ac-searching", .{});
+    }
     const hovered_list = r.contains(ctx.mouse.x, ctx.mouse.y) and c.ImGui_IsWindowHovered(c.ImGuiHoveredFlags_RootAndChildWindows);
     if (hovered_list and ctx.io.*.MouseWheel != 0 and n_items > visible_rows) {
         const delta: i32 = if (ctx.io.*.MouseWheel > 0) -1 else 1;

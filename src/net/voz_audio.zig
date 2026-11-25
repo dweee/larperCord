@@ -82,6 +82,9 @@ pub const Shared = struct {
     ptt: Atomic(bool) = .init(false),
     /// A tecla do aperte para falar está apertada (eventos do SDL, janela em foco).
     ptt_down: Atomic(bool) = .init(false),
+    /// Apertada de fora (`larpercord ctl ptt-down`, um atalho do compositor): vale sem
+    /// foco, e só solta com ptt-up, saindo da call ou trocando de modo.
+    ptt_ext: Atomic(bool) = .init(false),
     binding: Atomic(u32) = .init(0),
     /// O código virtual da tecla no Windows, para ler sem foco (0 = não dá).
     ptt_vk: Atomic(u8) = .init(0),
@@ -191,6 +194,7 @@ pub fn apply(set: *const S.Settings) void {
     if (set.voice_ptt != sh.ptt.load(.monotonic)) {
         sh.ptt.store(set.voice_ptt, .monotonic);
         sh.ptt_down.store(false, .monotonic);
+        sh.ptt_ext.store(false, .monotonic);
     }
     if (!std.mem.eql(u8, set.voice_key.slice(), ui_binding.slice())) {
         ui_binding = set.voice_key;
@@ -331,10 +335,15 @@ fn setPtt(v: ?bool) void {
 }
 
 /// A tecla do aperte para falar, na thread de voz: os eventos do SDL com a janela
-/// em foco e, no Windows, também com outra janela em foco.
+/// em foco, a de fora (`holdExternal`) e, no Windows, também com outra janela em foco.
 pub fn pttKey() bool {
     if (!sh.ptt.load(.monotonic)) return false;
-    return sh.ptt_down.load(.monotonic) or (linux and portal_down.load(.monotonic)) or ptt_global.down(sh.ptt_vk.load(.monotonic));
+    return sh.ptt_down.load(.monotonic) or (linux and portal_down.load(.monotonic)) or sh.ptt_ext.load(.monotonic) or ptt_global.down(sh.ptt_vk.load(.monotonic));
+}
+
+/// A tecla apertada ou solta de fora (app_ctl.zig); a thread de voz lê em `pttKey`.
+pub fn holdExternal(on: bool) void {
+    sh.ptt_ext.store(on, .monotonic);
 }
 
 // --- Dispositivos -----------------------------------------------------------

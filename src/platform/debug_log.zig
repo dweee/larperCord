@@ -86,6 +86,13 @@ fn open(p: [:0]const u8, restart: bool) c_int {
 /// `std_options.logFn`: continua indo para o terminal e, ligado, também para o arquivo.
 pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime format: []const u8, args: anytype) void {
     std.log.defaultLog(level, scope, format, args);
+    // O Console do Inspetor, enquanto ele grava (src/inspect/registros.zig).
+    const insp = @import("../inspect/registros.zig");
+    if (insp.gravando()) {
+        var ib: [2048]u8 = undefined;
+        const text = std.fmt.bufPrint(&ib, format, args) catch ib[0..];
+        insp.logLine(level, if (scope == .default) "" else @tagName(scope), text);
+    }
     if (!isOn()) return;
     var buf: [2048]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, level.asText() ++ ": " ++ format ++ "\n", args) catch return;

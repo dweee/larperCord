@@ -1,8 +1,11 @@
 //! Teto de envio do gateway. O Discord aceita 120 eventos por conexão a cada
 //! 60 s e derruba quem passa disso (docs.discord.food, "Rate Limiting"); o
 //! op 8 tem limite próprio, um por servidor por sessão a cada 30 s (a fila solta no
-//! máximo isso, com folga; o app pede só os membros dos autores de uma página de
-//! histórico, net/member_ask.zig, e conta no mesmo teto). A presença ainda fica em 5 a
+//! máximo isso, com folga, e conta no mesmo teto). O op 8 sai por dois motivos que
+//! dividem essa janela: os membros dos autores de uma página de histórico
+//! (net/member_ask.zig) e a busca do `@` na caixa de texto (net/member_search.zig), que
+//! passa na frente do primeiro no mesmo servidor e sai no máximo 4 vezes por minuto
+//! somando todos os servidores. A presença ainda fica em 5 a
 //! cada 20 s por conta nossa (a doc não dá número; trocar de status mais que
 //! isso não tem porquê). Aqui:
 //!  - heartbeat (op 1), IDENTIFY (op 2) e RESUME (op 6) saem sempre e na hora:
@@ -17,6 +20,7 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
 const member_ask = @import("member_ask.zig");
+const member_search = @import("member_search.zig");
 const Id = types.Id;
 
 pub const window_ms: i64 = 60_000;
@@ -131,13 +135,16 @@ pub const MembersStrike = struct { guild: Id, n: u8 };
 pub const MembersWait = struct { req: member_ask.Request, ready_ms: i64 };
 /// O próximo op 8 do servidor não sai antes de `until_ms`.
 pub const MembersHold = struct { guild: Id, until_ms: i64 };
+/// A busca do `@` esperando: não sai antes de `ready_ms` (a pausa depois da última tecla).
+pub const SearchWait = struct { q: member_search.Query, ready_ms: i64 };
 
 /// O que espera vez. A presença sai com o status do momento (só o último vale).
 /// `channel_info`: o servidor do op 43.
 /// `members`: um op 8 com os autores de uma página de histórico.
-pub const Item = union(enum) { presence, lazy: Lazy, voice: Voice, channel_info: Id, members: member_ask.Request };
+/// `search`: um op 8 com a busca do `@` (net/member_search.zig).
+pub const Item = union(enum) { presence, lazy: Lazy, voice: Voice, channel_info: Id, members: member_ask.Request, search: member_search.Query };
 /// O que entra por `push` (o op 8 entra por `pushMembers`, que sabe a hora e devolve o
-/// que não coube).
+/// que não coube, e a busca por `pushSearch`).
 pub const Op = union(enum) { presence, lazy: Lazy, voice: Voice, channel_info: Id };
 
 pub const Push = enum {
@@ -182,6 +189,11 @@ pub const Outbox = struct {
     strikes_n: usize = 0,
     strikes_all: u8 = 0,
     members_off: bool = false,
+    /// A busca do `@` esperando (só a última: uma nova toma o lugar). Enquanto ela existir,
+    /// o op 8 dos autores do mesmo servidor espera atrás dela.
+    search: ?SearchWait = null,
+    /// Quando as últimas buscas saíram (no máximo `member_search.per_minute` por minuto).
+    search_sent: Ring(member_search.per_minute) = .{},
 
     pub fn push(o: *Outbox, it: Op) Push {
         switch (it) {
@@ -251,6 +263,41 @@ pub const Outbox = struct {
         o.members_n += 1;
         r.n = 0;
         return true;
+    }
+
+    /// A busca do `@` entra no lugar da que esperava (devolvida, para quem chama responder
+    /// a ela), e sai `member_search.debounce_ms` depois desta tecla. A mesma busca de novo
+    /// não muda nada. Quem chama já conferiu que o op 8 do servidor não acabou.
+    pub fn pushSearch(o: *Outbox, q: member_search.Query, now_ms: i64) ?member_search.Query {
+        const old = o.search orelse {
+            o.search = .{ .q = q, .ready_ms = now_ms + member_search.debounce_ms };
+            return null;
+        };
+        if (old.q.eql(q)) return null;
+        o.search = .{ .q = q, .ready_ms = now_ms + member_search.debounce_ms };
+        return old.q;
+    }
+
+    /// Tira a busca que espera (a caixa cancelou, sessão nova).
+    pub fn takeSearch(o: *Outbox) ?member_search.Query {
+        const w = o.search orelse return null;
+        o.search = null;
+        return w.q;
+    }
+
+    /// A busca que espera segura o op 8 dos autores de `guild` (sai antes dele).
+    fn searchHolds(o: *const Outbox, guild: Id) bool {
+        const w = o.search orelse return false;
+        return w.q.guild == guild and !o.isOff(guild);
+    }
+
+    /// A busca pode sair agora: passou a pausa, a janela do servidor, a espera dela tem
+    /// onde ficar e o minuto ainda tem vaga.
+    fn searchReady(o: *Outbox, now_ms: i64) bool {
+        const w = o.search orelse return false;
+        if (o.isOff(w.q.guild)) return false;
+        return now_ms >= w.ready_ms and now_ms >= o.holdOf(w.q.guild) and o.canHold(w.q.guild, now_ms) and
+            o.search_sent.count(now_ms, window_ms) < member_search.per_minute;
     }
 
     /// Até quando o op 8 de `guild` espera.
@@ -362,7 +409,7 @@ pub const Outbox = struct {
     /// O op 8 que pode sair agora: o lote fechou, o servidor não está esperando e a
     /// espera dele tem onde ficar.
     fn nextMembers(o: *const Outbox, now_ms: i64) ?usize {
-        for (o.members[0..o.members_n], 0..) |w, i| if (now_ms >= w.ready_ms and now_ms >= o.holdOf(w.req.guild) and o.canHold(w.req.guild, now_ms)) return i;
+        for (o.members[0..o.members_n], 0..) |w, i| if (now_ms >= w.ready_ms and now_ms >= o.holdOf(w.req.guild) and o.canHold(w.req.guild, now_ms) and !o.searchHolds(w.req.guild)) return i;
         return null;
     }
 
@@ -372,7 +419,7 @@ pub const Outbox = struct {
     }
 
     pub fn pending(o: *const Outbox) usize {
-        return o.voice_n + o.lazy_n + o.info_n + o.members_n + @intFromBool(o.presence);
+        return o.voice_n + o.lazy_n + o.info_n + o.members_n + @intFromBool(o.presence) + @intFromBool(o.search != null);
     }
 
     fn presenceOk(o: *Outbox, now_ms: i64) bool {
@@ -380,7 +427,8 @@ pub const Outbox = struct {
     }
 
     /// O próximo que pode sair agora (já contado no teto). Voz primeiro (é a
-    /// pessoa esperando a call), depois presença, listas de membros e o op 43.
+    /// pessoa esperando a call), depois presença, listas de membros, o op 43, a busca
+    /// do `@` e o op 8 dos autores.
     pub fn pop(o: *Outbox, now_ms: i64) ?Item {
         if (o.pending() == 0 or !o.budget.allows(now_ms)) return null;
         var it: Item = undefined;
@@ -400,6 +448,13 @@ pub const Outbox = struct {
             it = .{ .channel_info = o.info[0] };
             std.mem.copyForwards(Id, o.info[0 .. o.info_n - 1], o.info[1..o.info_n]);
             o.info_n -= 1;
+        } else if (o.searchReady(now_ms)) {
+            const q = o.search.?.q;
+            o.search = null;
+            o.search_sent.push(now_ms);
+            it = .{ .search = q };
+            // A mesma janela do outro op 8: nada daquele servidor nos próximos 32 s.
+            _ = o.hold(q.guild, now_ms + members_window_ms, now_ms);
         } else if (o.nextMembers(now_ms)) |i| {
             const r = o.members[i].req;
             it = .{ .members = r };
@@ -440,6 +495,11 @@ pub const Outbox = struct {
                 o.info[0] = g;
                 o.info_n += 1;
             },
+            // Uma busca mais nova já entrou no lugar: vale ela. A janela e o minuto que o
+            // `pop` marcou ficam.
+            .search => |q| if (o.search == null) {
+                o.search = .{ .q = q, .ready_ms = 0 };
+            },
             // A janela que o `pop` marcou fica (no pior caso, espera 30 s à toa).
             .members => |r| {
                 if (o.members_n == o.members.len) return;
@@ -464,10 +524,18 @@ pub const Outbox = struct {
         if (o.pending() == 0) return std.math.maxInt(i64);
         const free = o.budget.freeAt(now_ms);
         if (o.voice_n > 0 or o.lazy_n > 0 or o.info_n > 0) return free;
-        // Só a presença e o op 8: cada um espera também o limite dele.
+        // Só a presença e o op 8 (dos autores e da busca): cada um espera também o limite dele.
         var at: i64 = std.math.maxInt(i64);
         if (o.presence) at = if (o.presenceOk(now_ms)) free else @max(free, o.presence_sent.oldestExpires(presence_window_ms));
+        if (o.search) |w| if (!o.isOff(w.q.guild)) {
+            var when = @max(w.ready_ms, o.holdOf(w.q.guild));
+            if (o.search_sent.count(now_ms, window_ms) >= member_search.per_minute) when = @max(when, o.search_sent.oldestExpires(window_ms));
+            if (!o.canHold(w.q.guild, @max(now_ms, when))) when = @max(when, o.firstHoldEnd());
+            at = @min(at, @max(free, when));
+        };
         for (o.members[0..o.members_n]) |w| {
+            // Atrás da busca do mesmo servidor: acorda com ela.
+            if (o.searchHolds(w.req.guild)) continue;
             var when = @max(w.ready_ms, o.holdOf(w.req.guild));
             // Sem vaga para a espera dele: só quando a primeira vencer (e não "agora",
             // com o pop devolvendo nada e o laço girando).
@@ -518,6 +586,10 @@ pub const Outbox = struct {
     /// servidor estranho.
     pub fn forgetGuild(o: *Outbox, guild: Id) void {
         o.forgetMembers(guild);
+        // (Quem chama já respondeu à busca que esperava, net/member_search.zig `leftGuild`.)
+        if (o.search) |w| if (w.q.guild == guild) {
+            o.search = null;
+        };
         var n: usize = 0;
         for (o.lazy[0..o.lazy_n]) |l| if (l.guild != guild) {
             o.lazy[n] = l;
@@ -558,6 +630,7 @@ pub const Outbox = struct {
         o.lazy_n = 0;
         o.info_n = 0;
         o.members_n = 0;
+        o.search = null;
         o.voice_n = 0;
         o.voice_head = 0;
     }

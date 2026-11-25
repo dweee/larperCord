@@ -156,6 +156,8 @@ pub const Settings = struct {
     data_saver: bool = false,
     /// Prévia do markdown acima da caixa de texto, quando tem formatação.
     md_preview: bool = true,
+    /// Balança de Markdown: com texto selecionado na caixa, B e I colocam ** / * nas pontas.
+    md_bar: bool = true,
     /// O botão do microfone na caixa de texto (e o atalho dele): grava um áudio e
     /// manda como um anexo .ogg comum (ui/gravar_audio.zig).
     record_audio: bool = true,
@@ -190,6 +192,9 @@ pub const Settings = struct {
 
     // Privacidade (o proxy fica na página Rede)
     send_typing: bool = true,
+    /// Foto e vídeo vão sem a localização e os dados da câmera: a rede manda uma cópia
+    /// limpa (net/envio_limpo.zig) e o arquivo da pessoa não muda.
+    strip_metadata: bool = true,
     /// Mensagens apagadas ficam na tela (marcadas) e as editadas guardam o
     /// texto original. Só neste computador.
     message_log: bool = false,
@@ -221,6 +226,8 @@ pub const Settings = struct {
 
     // Notificações (DMs e menções)
     desktop_notifs: bool = true,
+    /// "Marcar como lida" e "Responder" nas notificações de mensagens (app_notificacao.zig).
+    notif_reply: bool = true,
     taskbar_flash: bool = true,
     /// O som de mensagem nova (core/aviso.zig decide quando; o som em si é o
     /// `sound_message` abaixo, com os da call).
@@ -320,6 +327,9 @@ pub const Settings = struct {
     /// (O `tray_always` de um build de desenvolvimento da 0.6.2 virou esta opção: num
     /// arquivo que ainda o tenha, ele é ignorado.)
     close_to_tray: bool = true,
+    /// `larpercord ctl`: scripts e atalhos do sistema controlam o app aberto (app_ctl.zig).
+    /// Desligado, não há porta nenhuma escutando.
+    external_control: bool = true,
     /// 0 = seguir o sistema, 1 = português, 2 = inglês, 3 = japonês.
     language: u8 = 0,
     /// 0 = escuro, 1 = claro, 2 = seguir o sistema.

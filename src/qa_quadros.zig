@@ -38,6 +38,15 @@ fn framesSettled(app: *App) bool {
     return false;
 }
 
+var gifs_before = true;
+fn gifsOff(app: *App) void {
+    gifs_before = app.st.settings.autoplay_gifs;
+    app.st.settings.autoplay_gifs = false;
+}
+fn gifsOn(app: *App) void {
+    app.st.settings.autoplay_gifs = gifs_before;
+}
+
 fn framesChanged(app: *App) bool {
     return (app.gate.built - built_mark) > (app.gate.same - same_mark);
 }
@@ -116,8 +125,13 @@ fn scrollbarSelectsNothing(app: *App) bool {
 fn memoryShown(app: *App) bool {
     if (settings.mem_use.n_channels == 0 or settings.mem_use.n_people == 0 or settings.mem_use.places == 0) return false;
     if (app.stats.frames_built == 0) return false;
-    // Só a glibc informa o heap, e só o Linux separa o que vem de arquivos.
-    if (builtin.os.tag == .linux) return @atomicLoad(u32, &app.stats.heap_used_kb, .monotonic) > 0 and @atomicLoad(u32, &app.stats.file_kb, .monotonic) > 0;
+    // As partes da RAM somam o total (core/mem_partes.zig), e o total é de verdade.
+    const pt = settings.mem_partes_vistas;
+    if (pt.total_kb < 10 * 1024 or pt.soma() != pt.total_kb) return false;
+    // Só a glibc informa o heap, e só o Linux separa o que vem de arquivos: lá a divisão tem
+    // o heap ocupado em partes, e as bibliotecas contadas aparecem.
+    if (builtin.os.tag == .linux) return @atomicLoad(u32, &app.stats.heap_used_kb, .monotonic) > 0 and @atomicLoad(u32, &app.stats.file_kb, .monotonic) > 0 and
+        pt.heapUsado() > 0 and pt.get(.imgui) > 0 and pt.get(.sdl) > 0 and pt.get(.freetype) > 0;
     return true;
 }
 
@@ -141,6 +155,10 @@ fn resetLimits(app: *App) void {
 
 pub const ops = [_]Op{
     s("quadro igual não precisa ir para a tela"),
+    // O GIF da demonstração na lista (atrás das Configurações) troca de quadro a cada
+    // ~90 ms com a janela em foco: com ele tocando, dez quadros iguais seguidos só
+    // cabem se o app desenhar rápido o bastante. Parado aqui quer dizer sem GIF tocando.
+    .{ .run = gifsOff },
     .{ .key = .{ .key = c.ImGuiKey_Comma, .ctrl = true } },
     .{ .wait = 300 },
     click("settings:Sobre"),
@@ -152,6 +170,7 @@ pub const ops = [_]Op{
     .{ .expect = .{ .name = "o destaque do mouse muda o quadro", .check = framesChanged, .timeout_ms = 2000 } },
     .{ .run = markFrames },
     .{ .expect = .{ .name = "o mouse parou, volta a sair igual", .check = framesSettled, .timeout_ms = 15000 } },
+    .{ .run = gifsOn },
 
     s("página de desempenho mostra a memória por partes"),
     click("settings:Desempenho"),

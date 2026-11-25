@@ -7,6 +7,8 @@
 //! pedido sai sem cookies e só com os cabeçalhos que vieram na lista permitida:
 //! nada da conta do Discord passa por este arquivo.
 const std = @import("std");
+const insp = @import("../inspect/registros.zig");
+const insp_curl = @import("../inspect/curl_insp.zig");
 const c = @import("c");
 const wire = @import("wire.zig");
 const proxy = @import("../net/proxy.zig");
@@ -97,6 +99,12 @@ fn progress(_: ?*anyopaque, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t, _
     return if (stopping.load(.acquire)) 1 else 0;
 }
 
+fn inspHeaderCb(ptr: [*c]u8, size: usize, n: usize, user: ?*anyopaque) callconv(.c) usize {
+    const out: *std.ArrayList(u8) = @ptrCast(@alignCast(user.?));
+    insp_curl.responseHeader(out, ptr[0 .. size * n]);
+    return size * n;
+}
+
 fn perform(req: *wire.HttpReq, out: *std.ArrayList(u8), status: *u16) !void {
     const h = c.curl_easy_init() orelse return error.Network;
     defer c.curl_easy_cleanup(h);
@@ -140,7 +148,27 @@ fn perform(req: *wire.HttpReq, out: *std.ArrayList(u8), status: *u16) !void {
     if (qa_builds and qa_cainfo_len > 0) _ = c.curl_easy_setopt(h, c.CURLOPT_CAINFO, @as([*]const u8, &qa_cainfo));
     var pb: proxy.Buf = undefined;
     if (proxy.forUrl(&pb, url)) |p| _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
+    // A aba Rede do Inspetor (só gravando), com os cabeçalhos que o plugin mandou.
+    var insp_h: std.ArrayList(u8) = .empty;
+    defer insp_h.deinit(std.heap.c_allocator);
+    const insp_id = if (insp.gravando()) blk: {
+        var req_h: std.ArrayList(u8) = .empty;
+        defer req_h.deinit(std.heap.c_allocator);
+        insp_curl.requestHeaders(&req_h, list, ua);
+        _ = c.curl_easy_setopt(h, c.CURLOPT_HEADERFUNCTION, inspHeaderCb);
+        _ = c.curl_easy_setopt(h, c.CURLOPT_HEADERDATA, &insp_h);
+        break :blk insp.net.begin(.plugin, if (req.post) "POST" else "GET", url, req_h.items, if (req.post) req.body else null, "plugins");
+    } else 0;
     const rc = c.curl_easy_perform(h);
+    if (insp_id != 0) {
+        var e: insp.NetLog.End = .{ .resp_headers = insp_h.items, .resp_body = out.items };
+        insp_curl.endInfo(h, &e);
+        if (rc != c.CURLE_OK) {
+            e.failed = true;
+            e.note = if (sink.too_big or rc == c.CURLE_FILESIZE_EXCEEDED) "grande demais para um plugin" else std.mem.span(c.curl_easy_strerror(rc));
+        }
+        insp.net.end(insp_id, e);
+    }
     if (sink.too_big or rc == c.CURLE_FILESIZE_EXCEEDED) return error.TooBig;
     if (rc != c.CURLE_OK) return error.Network;
     var code: c_long = 0;

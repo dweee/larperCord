@@ -90,6 +90,9 @@ O cliente oficial é um navegador inteiro disfarçado de app. No mesmo PC:
 - **Opções de envio**: escolha se a resposta menciona o autor, mande em silêncio (`@silent`), sem prévia
   de links ou sem mencionar ninguém, e marque cada arquivo como spoiler ou dê um texto alternativo. Vote
   em enquetes e veja quem votou, veja quem reagiu e passe por mais de 50 fixadas.
+- **Imagens privadas**: fotos e vídeos vão sem a localização e os dados da câmera (Configurações →
+  Privacidade, ligado de começo; o arquivo no seu computador não muda), e uma imagem na bandeja pode ser
+  cortada ou ter partes escondidas com blocos grandes ou uma tarja preta antes de ir.
 - **Abas de canal**, paleta de comandos com busca aproximada (`Ctrl+K` / `Ctrl+Shift+P`: canais, DMs,
   servidores, temas, status, marcar como lido e as opções liga/desliga), atalhos de teclado e
   navegação estilo vim opcional (`j`/`k`, `gg`/`G`, `J`/`K` troca de canal, `/` busca).
@@ -102,6 +105,8 @@ O cliente oficial é um navegador inteiro disfarçado de app. No mesmo PC:
 - **Voz:** em Configurações → Voz você escolhe microfone e saída (lembrados pelo nome, voltam ao padrão se sumirem, trocam em plena call), ajusta os volumes, vê o nível do microfone ao vivo e usa "Testar microfone" para ouvir a si mesmo. A detecção de voz tem limiar ajustável sobre a barra ou modo automático que aprende o ruído de fundo. O modo "aperte para falar" aceita tecla ou botão do mouse e funciona com a janela em foco (atalho global não é portável pelo SDL). Há passa-altas contra ronco, porta de ruído e um som para cada evento da call (entrar, sair, outra pessoa entrar ou sair, mudo, ensurdecer, o toque), embutido ou um arquivo seu em WAV ou Ogg Opus, cada um desligável. Um som de mensagem nova toca com DM e menção quando você não está olhando a conversa (não nas silenciadas, nem em Não perturbe), com a chave em Configurações → Notificações. O painel de voz mostra ping, qualidade por cor, quando você está transmitindo e avisa se o microfone não abrir ou se o servidor te mutou ou ensurdeceu; mudo e surdo dos outros aparecem na lista da call.
 - **Roda no Linux e no Windows.** No Linux, prefere Wayland nativo numa sessão Wayland, com X11 como alternativa. O Windows 10/11 sai do mesmo código; os tokens ficam no Gerenciador de Credenciais.
 - **Fica na bandeja.** O ícone fica na bandeja do sistema da abertura até sair, com Abrir e Sair no menu dele mesmo com a janela aberta, e fechar mantém o app conectado lá. O clique esquerdo no ícone mostra ou esconde a janela. "Fechar para a bandeja" em Configurações → Avançado desliga tudo isso: sem ícone, e fechar encerra. Sem bandeja, fechar encerra. Abrir de novo traz a janela que já está rodando. No Linux a bandeja precisa de um painel StatusNotifier.
+- **Controle de fora.** O `larpercord ctl` fala com o app aberto: mutar, ensurdecer, aperte para falar, mostrar ou esconder a janela, abrir um canal e ler as contas de não lidas, por scripts, por um módulo do waybar ou do polybar ou por um atalho do compositor, que dá ao Linux um aperte para falar global (Hyprland, Sway, KDE, GNOME). Só o seu usuário consegue usar, e Configurações → Avançado desliga. [Guia →](docs/ctl.pt-BR.md)
+- **Responder pela notificação.** As notificações de DM e menção ganham os botões Marcar como lida e Responder, e o clique abre a conversa na mensagem, até da bandeja. Marcar como lida e a resposta digitada na notificação não trazem a janela, e a resposta segue as mesmas regras da caixa de texto (modo lento, permissões, castigo) e avisa quando não pode sair. No Linux elas vão direto pelo D-Bus: o KDE Plasma tem a caixa de texto na própria notificação, o GNOME tem os botões e Responder abre a conversa com a resposta pronta; sem servidor de notificações, fica o notify-send. No Windows são avisos de verdade com caixa de texto, e sem eles volta o balão de antes. Configurações → Notificações → "Responder pela notificação".
 - **Atualiza sozinho.** Verifica ao abrir ou em Configurações → Atualizações. Um botão baixa, instala e reinicia. As atualizações são assinadas, e uma versão sem a assinatura certa não é instalada. Há botão de reiniciar e uma página de Novidades com o que mudou em cada versão.
 - **Volume dos vídeos.** O player do app tem um controle de volume, lembrado entre uma vez e outra.
 - **Supressão de ruído no microfone.** Configurações → Voz → Supressão de ruído (Desligada / RNNoise), ligada por padrão e trocável em plena call. Usa o [RNNoise](https://github.com/xiph/rnnoise) 0.2 (BSD), embutido no executável e rodando neste computador, sem internet. Reduz ruído constante como ventilador, chiado e ar-condicionado; teclado e pancadas podem passar, outras vozes continuam e a sua pode abafar um pouco. Atrasa o microfone em 20 ms e custa de 2% a 3,5% de um núcleo num Core i5 de 2011 com o microfone aberto, e menos em processadores mais novos; desligada, no mudo ou com a tecla do aperte para falar solta, não custa nada.
@@ -112,8 +117,9 @@ O cliente oficial é um navegador inteiro disfarçado de app. No mesmo PC:
 - **Sua conta, sincronizada.** Bloquear, ignorar, pedidos de amizade (também pelo nome de usuário), silenciar e o nível das notificações, o status com prazo, o status personalizado e o nome que aparece, os pronomes e o Sobre mim do perfil ficam gravados na sua conta do Discord, como no app oficial. Pedidos de mensagem e spam ficam fora das suas DMs. O Rich Presence mostra o jogo que você está jogando, e os jogos sem ele (como o Dota 2) aparecem pelo programa aberto, de uma lista que você monta; os dois desligados por padrão.
 - **Texto em qualquer idioma.** O árabe sai ligado e o texto da direita para a esquerda vem na ordem certa ([GNU FriBidi](https://github.com/fribidi/fribidi)). Uma letra que falta na fonte do tema, em qualquer escrita, vem de uma fonte do sistema que a tenha, procurada só quando um texto assim aparece.
 - **Erros no código (opcional).** Veja erros enquanto digita um bloco de código, com o servidor de linguagem que você escolher. Desligado por padrão, nada embutido nem baixado. [Guia →](docs/lsp.pt-BR.md)
+- **Inspetor (F12).** Ferramentas de desenvolvedor do próprio app: escolha qualquer coisa na tela para ver que linha do tema a desenha, as cores pelo nome no tema e o contraste; veja cada pedido ao Discord e cada quadro do gateway (nunca o token), o log, os eventos internos e o custo de cada quadro; e comande tudo por uma linha de comandos. [Guia →](docs/inspector.pt-BR.md)
 - **Threads e fóruns.** Threads ativas aninhadas abaixo do canal pai (recolhíveis, com não lidas), abrindo como conversa normal, com abas, tela dividida, rascunho, cache e busca; cartão "N mensagens · última há X" na mensagem que abriu; criar thread, entrar, sair, renomear, pôr tags, arquivar e trancar pelo menu, e ver as arquivadas, inclusive as privadas. Fóruns e canais de mídia mostram a lista de posts no lugar da conversa, com busca local, ordem por atividade, páginas sob demanda e "Novo post" com título, tags e texto. Permissões herdadas do canal pai; a lista de membros mostra quem está na thread.
-- **Emoji e autocompletar.** Emoji personalizado aparece como imagem (animado inclusive), grande quando a mensagem é só emoji, e nas reações. Figurinhas PNG, APNG e GIF viram imagem, e a aba Figurinhas do seletor de GIFs envia. O seletor tem a lista Unicode inteira, busca em português e inglês, recentes e os emojis dos seus servidores, e avisa quando um emoji precisa de Nitro. Na caixa de texto, `@`, `#`, `:ab` e `/` (comandos de barra) abrem uma lista (setas, Tab/Enter, Esc ou clique); nomes com espaço viram menção de verdade ao enviar. No modo economia, emoji personalizado vira `:nome:`, sem baixar nada. Para regenerar a tabela: `tools/gen_emoji.py`.
+- **Emoji e autocompletar.** Emoji personalizado aparece como imagem (animado inclusive), grande quando a mensagem é só emoji, e nas reações. Figurinhas PNG, APNG e GIF viram imagem, e a aba Figurinhas do seletor de GIFs envia. O seletor tem a lista Unicode inteira, busca em português e inglês, recentes e os emojis dos seus servidores, e avisa quando um emoji precisa de Nitro. Na caixa de texto, `@`, `#`, `:ab` e `/` (comandos de barra) abrem uma lista (setas, Tab/Enter, Esc ou clique); nomes com espaço viram menção de verdade ao enviar. Num servidor grande, o `@` também pede ao Discord os membros cujo nome começa com o que foi digitado, então dá para mencionar quem está offline (depois de uma pausa, dentro do limite do Discord de um pedido de membros por servidor a cada 30 s). No modo economia, emoji personalizado vira `:nome:`, sem baixar nada. Para regenerar a tabela: `tools/gen_emoji.py`.
 - **Leitura sincronizada com o Discord**: não lidos e menções corretos ao abrir, `MESSAGE_ACK` de outro aparelho limpa aqui, confirmação como o cliente oficial (no máximo uma por canal a cada 3 s; nada sozinho com a janela sem foco), "marcar como lido" por canal e por servidor, "marcar como não lida" a partir de uma mensagem.
 - **Linha NOVAS MENSAGENS** com botão "N novas mensagens · ir para a primeira" e "marcar como lida"; o canal abre na primeira não lida (dá para desligar em Configurações → Chat).
 - **Mensagens fixadas**: alfinete no cabeçalho, fixar e desafixar pelo menu; ir para qualquer mensagem antiga busca em volta dela, com "Voltar ao presente".
@@ -152,8 +158,11 @@ O cliente oficial é um navegador inteiro disfarçado de app. No mesmo PC:
   js/ts, py, rust, go, sh, json, lua…) e botão "Copiar"; prévia acima da caixa enquanto se digita.
 - **Vídeos tocando na conversa** (anexos e links diretos para .mp4/.webm) com o **FFmpeg 7, 8 ou 9,
   se tiver** (carregado só no primeiro play, sem dependência de build): play/pausa,
-  barra de progresso, som; até 480p e ~30 qps. Sem FFmpeg, o vídeo abre no navegador. No Linux, é o
-  pacote `ffmpeg` da distro. O Windows não tem, então Configurações → Chat → Vídeos busca uma vez
+  barra de progresso, som e tela cheia (o botão, dois cliques ou F: a janela vai para a tela cheia,
+  os controles somem enquanto toca, espaço, setas e M funcionam, Esc devolve a janela como estava);
+  até 480p na conversa, até o tamanho da tela (no máximo 1080p) em tela cheia, e ~30 qps. Sem
+  FFmpeg, o vídeo abre no navegador. No Linux, é o pacote `ffmpeg` da distro. O Windows não tem,
+  então Configurações → Chat → Vídeos busca uma vez
   (Verificar se tem FFmpeg, depois Baixar FFmpeg): cerca de 80 MB de github.com/BtbN/FFmpeg-Builds,
   conferidos com um SHA-256 fixo, cerca de 128 MB em disco em `%LOCALAPPDATA%\larpercord\ffmpeg`.
   "Escolher a pasta do FFmpeg…" ali aceita uma versão "shared" do FFmpeg que você já tem, e sem o
@@ -164,8 +173,9 @@ O cliente oficial é um navegador inteiro disfarçado de app. No mesmo PC:
   arquivos de áudio (.mp3, .ogg, .wav, .flac, .m4a…) tocam na conversa, com a onda do arquivo inteiro
   como barra, velocidade 1×/1,5×/2× e barrinhas que dançam enquanto toca (Opus, MP3 e WAV sem instalar
   nada, o resto pelo FFmpeg); GIFs longos tocam todos os quadros, e uma estrela em qualquer GIF põe nos
-  seus favoritos.
-  longos tocam todos os quadros, e uma estrela em qualquer GIF põe nos seus favoritos.
+  seus favoritos, cuja aba no seletor de GIFs abre na hora com todos tocando de um clipe pequeno guardado
+  em `~/.cache/larpercord/gif-favorites` (`%LOCALAPPDATA%\larpercord\gif-favorites` no Windows; teto de
+  50 MB, e Apagar cache leva).
 - **Exportar e salvar**: botão direito numa conversa → Exportar conversa… grava em HTML (uma página só, que
   abre sem internet), Markdown ou JSON com o que já está no computador, sem pedir nada ao Discord. Botão
   direito numa imagem, vídeo ou arquivo → Salvar… ou Salvar em Downloads guarda o arquivo original.
@@ -302,12 +312,14 @@ Nada de mágica, só muitas decisões pequenas:
 5. **Markdown interpretado uma vez**, quando a mensagem chega. A interface só faz layout dos
    trechos, com **cache de altura por largura**.
 6. **Lista virtualizada**: busca binária pelo primeiro item visível, desenha só a tela.
-7. **Memória com teto**: 1.500 mensagens por canal e, por padrão, 2.000 no total (Configurações → Desempenho muda), e as antigas são liberadas. Depois
-   de um minuto na bandeja ou minimizada, as imagens também saem da memória, menos as pequenas que estavam na tela.
+7. **Memória com teto**: 1.500 mensagens por canal e, por padrão, 2.000 no total (Configurações → Desempenho muda), e as antigas são liberadas. Uma
+   imagem que não é desenhada há um minuto sai da memória, com os quadros dos GIFs. Na bandeja, a janela, o renderizador (o contexto da GPU) e todas as
+   texturas vão embora de uma vez e a memória volta ao sistema; só as imagens pequenas que estavam na tela ficam, em pixels, para a janela voltar
+   inteira. Depois de um minuto minimizada, as imagens também saem da memória, menos essas pequenas.
 8. **No Linux, o fontconfig é liberado** depois de resolver as fontes (`FcFini` + `malloc_trim`). O
    Windows não tem fontconfig: as fontes são abertas direto de `C:\Windows\Fonts`.
 9. **Sem cursor piscando**: o cursor piscando sozinho manteria a CPU acordada.
-10. **Binário enxuto**: build release sem símbolos de debug. O arquivo para Linux tem cerca de 16 MB com SDL3, libcurl e OpenSSL dentro, compilados só com as partes que o app usa e sem símbolos exportados, e cerca de 10 MB usando as cópias do sistema. No Windows, esses três vão como DLLs ao lado do `.exe`. Os maiores textos lá dentro (as traduções em japonês e russo, o changelog, a tabela de emoji) vão comprimidos e só abrem quando precisa.
+10. **Binário enxuto**: build release sem símbolos de debug. O arquivo para Linux tem cerca de 16 MB com SDL3, libcurl e OpenSSL dentro, compilados só com as partes que o app usa e sem símbolos exportados, e cerca de 10 MB usando as cópias do sistema. No Windows eles também vão dentro do `.exe` único (desde a 0.6.7). Os maiores textos lá dentro (as traduções em japonês e russo, o changelog, a tabela de emoji) vão comprimidos e só abrem quando precisa.
 
 ## Compilando
 
@@ -342,6 +354,7 @@ Georgia e Segoe UI Emoji de `C:\Windows\Fonts`.
 | `zig build test` | testes (KDL, cores, layout, markdown, Store, temas embutidos, configurações) |
 | `tools/snapshots.sh` | gera os prints de `docs/` sem abrir janela |
 | `tools/membench.sh 60` | mede RAM e CPU de cada tema e falha se passar de 60 MB |
+| `tools/ram_conta_grande.sh BIN` | RAM e CPU em uns minutos de uso de uma conta de mentira com 52 servidores e 2.450 canais, parte por parte (build do QA com `-Dqa=true -Dqa-rede=true`; sem conta e sem rede) |
 | `tools/tls_check.sh` | compara a impressão TLS e HTTP/2 do app com a do Chrome, sem token |
 | `tools/qa_quadros.py BIN [--slow]` | confere o pulo de quadros e a memória com a janela escondida, com janela de verdade num Xvfb |
 | `zig build web -Demscripten=PASTA` | a demonstração no navegador em WebAssembly ([como](tools/web/README.pt-BR.md)) |
@@ -377,7 +390,7 @@ src/
   platform/   janela, renderizador, "acordar" o laço; o único lugar que conhece o SDL
 themes/       os temas embutidos (também compilados dentro do binário)
 third_party/  Dear ImGui 1.93 + dear_bindings (C), com um patch pequeno para emoji em bitmap; GNU FriBidi;
-              dr_mp3 + dr_wav (anexos de áudio)
+              dr_mp3 + dr_wav (anexos de áudio); mimalloc (só com -Dmimalloc=true)
 ```
 
 O fluxo é **interface → `Action` → app → `Command` → gateway → `Event` → Store → interface**.
@@ -393,7 +406,8 @@ gateway falso pelo real não toca na interface.
 - [x] Permissões por canal (cadeado no que não dá pra ler), threads e fóruns
 - [x] Windows 10/11
 - [x] Bandeja do sistema, atualização assinada e scripts de instalação
-- [ ] Notificações nativas via D-Bus no Linux
+- [x] Abrir pelos servidores, canais e mensagens salvos, e sincronizar quando o Discord responder
+- [x] Notificações nativas via D-Bus no Linux
 - [x] Voz (DAVE/MLS + Opus)
 - [x] Calls em DM e grupo
 - [x] Rich Presence: mostrar o jogo que você está jogando, desligado por padrão
@@ -406,7 +420,6 @@ gateway falso pelo real não toca na interface.
 
 **A seguir**
 
-- [ ] Abrir pelos servidores, canais e mensagens salvos, e sincronizar quando o Discord responder
 - [ ] Atlas de texturas para avatares e emojis
 - [ ] Configurar servidor e cargos
 - [ ] Um editor de temas melhor
@@ -415,5 +428,5 @@ gateway falso pelo real não toca na interface.
 
 ## Licença
 
-O larperCord usa a [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). O código de terceiros mantém a própria licença, em cada pasta de `third_party/`: Dear ImGui e dear_bindings são MIT, RNNoise é BSD, GNU FriBidi é LGPL-2.1 ou posterior, dr_mp3 e dr_wav (dr_libs) são domínio público ou MIT No Attribution. O arquivo
+O larperCord usa a [GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`). O código de terceiros mantém a própria licença, em cada pasta de `third_party/`: Dear ImGui e dear_bindings são MIT, RNNoise é BSD, GNU FriBidi é LGPL-2.1 ou posterior, dr_mp3 e dr_wav (dr_libs) são domínio público ou MIT No Attribution, mimalloc é MIT. O arquivo
 `third_party/imgui/misc/freetype/imgui_freetype.cpp` tem alterações marcadas com `[larperCord]`.

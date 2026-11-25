@@ -1,8 +1,10 @@
 //! QA da janela flutuante (app_flutuante.zig): abre pelo menu da aba com a conversa, a
 //! mensagem nova aparece nela, a caixa dela manda (o gateway de mentira recebe), o botão
 //! de voltar abre a conversa na principal, a call vai para a mesma janela pelo botão da
-//! tela da call e muta por ela, a principal vai para a bandeja e ela continua, parada não
-//! faz quadro, e fechar solta tudo e a principal volta a pular os quadros iguais. Tudo no
+//! tela da call e muta por ela, a principal vai para a bandeja e ela continua (a principal
+//! guarda o renderizador enquanto ela está aberta, solta quando ela fecha na bandeja e o
+//! refaz quando ela abre de novo lá), parada não faz quadro, e fechar solta tudo e a
+//! principal volta a pular os quadros iguais. Tudo no
 //! driver offscreen do SDL: a janela flutuante também é de mentira aqui, e os prints dela
 //! saem da superfície dela.
 //!
@@ -301,8 +303,28 @@ fn toTray(app: *App) void {
 }
 fn hiddenPipOpen(app: *App) bool {
     const win = app.pip.win orelse return false;
-    return c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_HIDDEN != 0 and app.in_tray and
-        c.SDL_GetWindowFlags(win) & c.SDL_WINDOW_HIDDEN == 0;
+    return app.win.flags() & c.SDL_WINDOW_HIDDEN != 0 and app.in_tray and
+        c.SDL_GetWindowFlags(win) & c.SDL_WINDOW_HIDDEN == 0 and
+        // Ela desenha com o renderizador da principal: ele fica.
+        app.win.renderer != null and app.images.renderer == app.win.renderer;
+}
+var releases0: u32 = 0;
+fn rememberReleases(app: *App) void {
+    releases0 = app.gpu_releases;
+}
+/// Fechou a flutuante com a principal na bandeja: aí sim a parte da GPU da principal sai.
+fn trayReleased(app: *App) bool {
+    // Fica só a janela escondida de 1×1 da bandeja (Window.ancora), para o laço dormir.
+    const anchor_only = if (app.win.ancora) |a| windowCount() == 1 and c.SDL_GetWindowFlags(a) & c.SDL_WINDOW_HIDDEN != 0 else false;
+    return app.pip.win == null and app.in_tray and app.win.window == null and app.win.renderer == null and
+        app.gpu_releases == releases0 + 1 and anchor_only;
+}
+/// Abriu de novo com a principal na bandeja: o renderizador volta, e a principal continua escondida.
+fn pipBackInTray(app: *App) bool {
+    const win = app.pip.win orelse return false;
+    return app.in_tray and app.win.renderer != null and app.win.flags() & c.SDL_WINDOW_HIDDEN != 0 and
+        c.SDL_GetWindowFlags(win) & c.SDL_WINDOW_HIDDEN == 0 and windowCount() == 2 and
+        std.meta.eql(app.pip.alvo, .{ .call = call0 }) and qa.find("pip/grid-view") != null;
 }
 fn speakDuda(app: *App) void {
     push(app, .{ .voice_speaking = .{ .user = duda, .speaking = true } });
@@ -314,7 +336,7 @@ fn wakeShow(app: *App) void {
     platform.Window.wake(app.win.wake_type, .show);
 }
 fn shownAgain(app: *App) bool {
-    return c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_HIDDEN == 0 and !app.in_tray and app.pip.win != null;
+    return app.win.flags() & c.SDL_WINDOW_HIDDEN == 0 and !app.in_tray and app.pip.win != null;
 }
 
 // --- De volta à conversa, e a call que acaba --------------------------------------
@@ -501,6 +523,12 @@ pub const ops = [_]Op{
     expect("a principal vai para a bandeja e a flutuante continua aberta", hiddenPipOpen),
     run(speakDuda),
     expect("quem fala aparece na janela flutuante com a principal escondida", speakingInPip),
+    run(rememberReleases),
+    run(closeIt),
+    expect("fechar a flutuante com a principal na bandeja solta a janela e o renderizador da principal", trayReleased),
+    run(openPipCall),
+    expect("abrir de novo na bandeja: o renderizador volta, a principal continua escondida", pipBackInTray),
+    expect("e quem fala continua aparecendo", speakingInPip),
     run(wakeShow),
     expect("a principal volta da bandeja e a flutuante continua", shownAgain),
 

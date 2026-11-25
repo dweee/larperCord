@@ -1418,6 +1418,16 @@ pub fn hat(b: Brush, h: v.Hat) void {
     }
 }
 
+/// O visual tem uma peça que mexe com o relógio (`Brush.t`): a hélice, a auréola e a
+/// notinha do assobio (essa só no tamanho grande). O mascote do canto parado é repetido
+/// de um quadro para o outro sem refazer (ui/carimbo.zig), e o relógio só entra no resumo
+/// com uma delas: uma peça nova que leia `t` entra aqui (o QA do mascote desenha cada
+/// peça em dois relógios e confere).
+pub fn movesWithClock(l: *const v.Look, small: bool) bool {
+    if (l.hat == .halo or l.hat == .propeller) return true;
+    return l.mouth == .whistle and !small;
+}
+
 // Os chapéus das datas, quando escolhidos (o do canto, nas datas, usa os de
 // mascote_terminal, que são estes mesmos).
 fn santa(b: Brush) void {

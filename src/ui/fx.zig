@@ -39,6 +39,14 @@ pub var last_period_ms: i64 = 0;
 pub var hover_seen: f32 = 0;
 var hover_now: f32 = 0;
 
+/// O renderizador vai embora (a janela na bandeja, App.releaseGpu): todas saem, e
+/// são geradas de novo no renderizador novo quando um quadro pedir.
+pub fn dropAll() void {
+    for (table[0..count]) |e| c.SDL_DestroyTexture(e.tex);
+    count = 0;
+    live_entries = 0;
+}
+
 /// Solta o que não foi usado nos últimos quadros (trocou de tema, opção
 /// desligada). O quadro anterior já foi para a tela, então é seguro.
 pub fn beginFrame() void {

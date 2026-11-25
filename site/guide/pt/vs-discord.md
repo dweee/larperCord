@@ -14,7 +14,7 @@ Alguns itens aqui são o jeito como o larperCord fica leve, e o app oficial pode
 - **[0–0,4% de CPU parado](page:performance#os-numeros).** O app dorme e só acorda com a rede, uma tecla ou o relógio. ²
 - **[Cerca de 14 MB](page:performance#os-numeros)** no download para Linux, num arquivo só. ³
 - **[As coisas nascem quando você pede](page:performance#dez-decisoes).** A thread de voz quando você entra numa call, e ela para quando você sai, o FFmpeg no primeiro vídeo, e nenhuma thread de plugins enquanto nenhum plugin estiver ligado.
-- **[Escondido, fica mais leve](page:performance#dez-decisoes).** Depois de um minuto na bandeja ou minimizado, as imagens saem da memória, menos as pequenas que estavam na tela.
+- **[Escondido, fica mais leve](page:performance#dez-decisoes).** Na bandeja, a janela, o renderizador e todas as texturas vão embora e a memória volta ao sistema; depois de um minuto minimizado, as imagens saem da memória, menos as pequenas que estavam na tela.
 - **[Limites de memória que você escolhe](page:settings#as-paginas).** Configurações → Desempenho mostra a RAM ao vivo e para onde ela vai, e define quanto fica para imagens, cada GIF e mensagens.
 
 ¹ PSS: 125–140 MB no uso normal de uma conta e cerca de 70 MB logo depois de abrir, num PC com Arch Linux, Hyprland, um i5-2400S, uma GTX 1050 Ti e janela de 1280×800. Cerca de 35 MB disso são o driver da NVIDIA, as bibliotecas e as fontes. Medido num build que usa as bibliotecas do sistema; lado a lado na demonstração, o arquivo publicado usou cerca de 2 MB a mais. O seu depende dos seus servidores, membros e imagens.

@@ -14,6 +14,7 @@ const leitura = @import("../core/leitura.zig");
 const jsonx = @import("jsonx.zig");
 const envio_json = @import("envio_json.zig");
 const envio = @import("../core/envio.zig");
+const envio_limpo = @import("envio_limpo.zig");
 const polls = @import("../core/polls.zig");
 const social = @import("social.zig");
 const thread_json = @import("thread_json.zig");
@@ -27,6 +28,7 @@ const alloc = std.heap.c_allocator;
 const voice_mod = @import("voice.zig");
 const call_json = @import("call_json.zig");
 const member_ask = @import("member_ask.zig");
+const member_search = @import("member_search.zig");
 const gw_budget = @import("gw_budget.zig");
 const fake_interactions = @import("fake_interactions.zig");
 
@@ -90,6 +92,13 @@ pub const sent = struct {
     pub var send_types_len: A = .init(0);
     pub var send_file: [512]u8 = undefined;
     pub var send_file_len: A = .init(0);
+    /// O que subiria como o primeiro arquivo do último envio (o começo, até caber aqui, e
+    /// o tamanho todo): a cópia sem localização (net/envio_limpo.zig) ou o próprio arquivo.
+    pub var send_data: [32 * 1024]u8 = undefined;
+    pub var send_data_len: A = .init(0);
+    pub var send_data_size: A = .init(0);
+    /// Quantos envios foram recusados por não dar para tirar a localização.
+    pub var strip_failures: A = .init(0);
     pub var votes: A = .init(0);
     pub var vote_body: [160]u8 = undefined;
     pub var vote_len: A = .init(0);
@@ -138,6 +147,16 @@ pub const sent = struct {
     /// Op 8 esperando na fila agora, e pedidos da última página de um canal que já tinha
     /// pedido nesta sessão (o QA confere que nada recarrega à toa).
     pub var member_queued: A = .init(0);
+    /// A busca do `@` (op 8 com `query`, net/member_search.zig), pela mesma fila: quantas
+    /// saíram, a última (texto, servidor, hora no relógio monotônico) e quantas respostas
+    /// voltaram. As que o Discord recusaria (o mesmo servidor em menos de 30 s, contando
+    /// o outro op 8) entram em `member_refused`, e as sem servidor em `member_wrong`.
+    pub var member_searches: A = .init(0);
+    pub var member_query: [member_search.max_len]u8 = undefined;
+    pub var member_query_len: A = .init(0);
+    pub var member_query_guild: A = .init(0);
+    pub var member_query_at: A = .init(0);
+    pub var member_answers: A = .init(0);
     pub var history_refetches: A = .init(0);
     pub var create_dms: A = .init(0);
     /// GET /channels/{id}: a DM que apareceu só por uma mensagem, e qual foi a última.
@@ -266,6 +285,11 @@ pub const Gateway = struct {
     members_ask: member_ask.Asker = .{},
     member_out: gw_budget.Outbox = .{},
     member_replies: std.ArrayList(struct { at_ms: i64, req: member_ask.Request }) = .empty,
+    /// A busca do `@`, como o gateway de verdade (net/member_search.zig), na mesma fila; a
+    /// resposta chega um pouco depois do envio, filtrada pelo começo do nome.
+    searcher: member_search.Searcher = .{},
+    search_seq: u32 = 0,
+    search_replies: std.ArrayList(struct { at_ms: i64, seq: u32 }) = .empty,
     asked: std.AutoHashMapUnmanaged([2]Id, void) = .empty,
     members_last: std.AutoHashMapUnmanaged(Id, i64) = .empty,
     /// Canais que já pediram a última página nesta sessão.
@@ -394,6 +418,7 @@ pub const Gateway = struct {
         g.presence.deinit(alloc);
         g.conta.deinit();
         @import("fake_conta.zig").deinit();
+        @import("fake_pastas.zig").deinit();
         g.rels.deinit(alloc);
     }
 
@@ -604,7 +629,10 @@ pub const Gateway = struct {
         g.emit(.{ .my_limits = .{ .guild = guildId(quarantine_guild), .member_flags = 1 << 7 } });
         try g.demoActivities();
         try g.demoFaces();
-        g.emit(.{ .guild_folders = try demoFolders() });
+        // As configurações vão junto no READY (net/fake_pastas.zig): o app guarda a cópia.
+        const folders = try demoFolders();
+        try @import("fake_pastas.zig").ready(folders);
+        g.emit(.{ .guild_folders = folders });
         try g.demoThreads();
         try g.demoEmojis();
         try g.demoStickers();
@@ -648,8 +676,41 @@ pub const Gateway = struct {
                         for (names[0..nf], 0..) |nm, i| tw.print("{s}{s}", .{ if (i > 0) "," else "", envio_json.partType(nm) orelse "" }) catch {};
                         sent.keep(&sent.send_types, &sent.send_types_len, tw.buffered());
                         sent.keep(&sent.send_file, &sent.send_file_len, if (nf > 0) m.files[0] else "");
-                        _ = sent.sends.fetchAdd(1, .monotonic);
                     }
+                    // Como o de verdade: a cópia limpa no lugar de cada arquivo, apagada no fim
+                    // do "pedido". O QA lê os bytes do primeiro, como subiriam.
+                    {
+                        var limpos: [10]envio_limpo.Preparo = @splat(.original);
+                        const nf = @min(m.files.len, limpos.len);
+                        defer for (limpos[0..nf]) |lp| envio_limpo.soltar(lp);
+                        var recusado = false;
+                        if (m.strip_metadata) for (m.files[0..nf], 0..) |f, i| {
+                            limpos[i] = envio_limpo.preparar(f);
+                            recusado = recusado or limpos[i] == .falhou;
+                        };
+                        if (nf > 0) {
+                            const f = switch (limpos[0]) {
+                                .limpo => |l| l,
+                                else => m.files[0],
+                            };
+                            var size: usize = 0;
+                            if (c.SDL_LoadFile(f.ptr, &size)) |data| {
+                                defer c.SDL_free(data);
+                                sent.keep(&sent.send_data, &sent.send_data_len, @as([*]const u8, @ptrCast(data))[0..size]);
+                            } else sent.keep(&sent.send_data, &sent.send_data_len, "");
+                            sent.send_data_size.store(size, .release);
+                        }
+                        if (recusado) {
+                            _ = sent.strip_failures.fetchAdd(1, .monotonic);
+                            envio.freeFileOpts(alloc, m.file_opts);
+                            for (m.files) |f| alloc.free(f);
+                            if (m.files.len > 0) alloc.free(m.files);
+                            alloc.free(m.content);
+                            g.emit(.{ .send_failed = .{ .channel = m.channel, .nonce = m.nonce } });
+                            continue;
+                        }
+                    }
+                    _ = sent.sends.fetchAdd(1, .monotonic);
                     envio.freeFileOpts(alloc, m.file_opts);
                     // Os arquivos já aparecem na cópia pendente (o Store
                     // mantém os anexos dela na confirmação).
@@ -747,6 +808,7 @@ pub const Gateway = struct {
                 .delete_thread => |id| g.emit(.{ .channel_delete = id }),
                 .leave_guild => |id| {
                     g.members_ask.forgetGuild(id);
+                    g.replySearch(g.searcher.leftGuild(&g.member_out, id));
                     g.member_out.forgetMembers(id);
                     g.emit(.{ .guild_delete = id });
                 },
@@ -830,6 +892,11 @@ pub const Gateway = struct {
                     _ = sent.subscribes.fetchAdd(1, .monotonic);
                     sent.sub_channel.store(sg.channel, .monotonic);
                     try g.memberList(sg.guild);
+                },
+                // A busca do `@`: a mesma decisão e a mesma fila do gateway de verdade.
+                .search_members => |q| {
+                    g.replySearch(g.searcher.ask(&g.member_out, q, monoMs()));
+                    try g.flushMembers();
                 },
                 // Op 43: o CHANNEL_INFO com os canais de voz do servidor que têm call.
                 .channel_info => |gid| {
@@ -1090,6 +1157,11 @@ pub const Gateway = struct {
                     g.emit(.{ .invite_joined = .{ .code = code, .status = status, .guild = if (status == .ok) guildId(2) else 0 } });
                 },
                 .conta => |cc| @import("fake_conta.zig").execute(g, cc),
+                .folders => |f| {
+                    const demo = try demoFolders();
+                    defer @import("../core/pastas.zig").freeFolders(alloc, demo);
+                    try @import("fake_pastas.zig").execute(g, f, demo);
+                },
                 .entrada => |e| try g.demoEntrada(e),
                 .fetch_invite => |code| {
                     _ = sent.invite_fetches.fetchAdd(1, .monotonic);
@@ -1408,9 +1480,15 @@ pub const Gateway = struct {
         // Quem está neste servidor e em qual cargo (0 = fundação, 1 = moderação, 2 = membro).
         // No servidor grande, a lista não traz quem está offline (como no Discord).
         var rank: [users.len]?u8 = @splat(null);
+        // Quem é de lá mas a lista não traz (offline no servidor grande): conta no total,
+        // como o `member_count` do Discord.
+        var hidden: u32 = 0;
         for (users, 0..) |u, i| {
             rank[i] = g.demoRank(gi, u.id) orelse continue;
-            if (gi == large_guild and u.status == .offline) rank[i] = null else g.members_ask.see(alloc, gid, u.id);
+            if (gi == large_guild and u.status == .offline) {
+                rank[i] = null;
+                hidden += 1;
+            } else g.members_ask.see(alloc, gid, u.id);
         }
         var items: std.ArrayList(types.MemberItem) = .empty;
         defer items.deinit(alloc);
@@ -1439,7 +1517,7 @@ pub const Gateway = struct {
                 try items.append(alloc, .{ .member = .{ .user = u.id, .info = g.infoFor(gid, u.id, role_ids, rank[i].?) } });
             };
         }
-        total = online + offline;
+        total = online + offline + hidden;
         const ops = try alloc.alloc(types.MemberOp, 1);
         ops[0] = .{ .kind = .sync, .index = 0, .end = 99, .items = try alloc.dupe(types.MemberItem, items.items) };
         g.emit(.{ .member_list = .{ .guild = gid, .list_id = gid, .online = online, .total = total, .ops = ops } });
@@ -1473,6 +1551,10 @@ pub const Gateway = struct {
         while (g.member_out.pop(now)) |it| {
             const r = switch (it) {
                 .members => |x| x,
+                .search => |q| {
+                    try g.searchSent(q, now);
+                    continue;
+                },
                 else => continue,
             };
             _ = sent.member_requests.fetchAdd(1, .monotonic);
@@ -1491,6 +1573,60 @@ pub const Gateway = struct {
             };
             try g.member_replies.append(alloc, .{ .at_ms = nowMs() + 120, .req = r });
         }
+    }
+
+    fn replySearch(g: *Gateway, out: member_search.Replies) void {
+        for (out.slice()) |r| g.emit(.{ .member_search = r });
+    }
+
+    /// Uma busca do `@` saiu: conta, confere o limite do Discord (o mesmo servidor em menos
+    /// de 30 s, contando o op 8 dos autores) e agenda a resposta.
+    fn searchSent(g: *Gateway, q: member_search.Query, now: i64) !void {
+        _ = sent.member_searches.fetchAdd(1, .monotonic);
+        sent.keep(&sent.member_query, &sent.member_query_len, q.text());
+        sent.member_query_guild.store(q.guild, .release);
+        sent.member_query_at.store(@intCast(now), .release);
+        if (q.guild < guildId(0) or q.guild >= guildId(guilds.len)) _ = sent.member_wrong.fetchAdd(1, .monotonic);
+        const last = try g.members_last.getOrPut(alloc, q.guild);
+        if (last.found_existing and now - last.value_ptr.* < 30_000) _ = sent.member_refused.fetchAdd(1, .monotonic);
+        last.value_ptr.* = now;
+        const seq = g.search_seq;
+        g.search_seq +%= 1;
+        if (g.searcher.wrote(q, seq)) |lost| g.emit(.{ .member_search = lost });
+        try g.search_replies.append(alloc, .{ .at_ms = nowMs() + 120, .seq = seq });
+    }
+
+    /// O GUILD_MEMBERS_CHUNK de uma busca: os membros do servidor cujo nome de usuário ou
+    /// apelido de lá começa com o texto (sem diferenciar maiúsculas), até o `limit`, com
+    /// cargos e apelido como no op 8 dos autores; depois, a resposta à caixa.
+    fn searchChunk(g: *Gateway, seq: u32) !void {
+        const q = g.searcher.query(seq) orelse return;
+        _ = sent.member_answers.fetchAdd(1, .monotonic);
+        g.member_out.membersAnswered(q.guild);
+        var found: usize = 0;
+        if (q.guild >= guildId(0) and (q.guild - guildId(0)) % 1000 == 0 and (q.guild - guildId(0)) / 1000 < guilds.len) {
+            const gi: usize = @intCast((q.guild - guildId(0)) / 1000);
+            const role_ids = [_]Id{ q.guild + 901, q.guild + 902, q.guild + 903 };
+            for (users) |u| {
+                if (found == member_search.limit) break;
+                const rank = g.demoRank(gi, u.id) orelse continue;
+                var nick: ?[]const u8 = null;
+                for (large_faces) |f| if (gi == large_guild and f.user == u.id) {
+                    nick = f.nick;
+                };
+                if (gi == 0) for (demo_faces) |f| if (f.user == u.id) {
+                    nick = f.nick;
+                };
+                const by_nick = if (nick) |n| std.ascii.startsWithIgnoreCase(n, q.text()) else false;
+                if (!std.ascii.startsWithIgnoreCase(u.name, q.text()) and !by_nick) continue;
+                found += 1;
+                g.emit(.{ .member_info = .{ .guild = q.guild, .user = u.id, .info = g.infoFor(q.guild, u.id, role_ids, rank) } });
+                // Como o gateway de verdade: com a cor entregue, o op 8 dos autores não a pede.
+                g.members_ask.see(alloc, q.guild, u.id);
+                if (gi == large_guild) if (nick) |n| g.emit(.{ .member_face = .{ .guild = q.guild, .user = u.id, .face = .{ .nick = try alloc.dupe(u8, n) } } });
+            }
+        }
+        g.replySearch(g.searcher.answered(&g.member_out, seq, found, true));
     }
 
     /// O GUILD_MEMBERS_CHUNK: quem é membro vem com cargos e perfil do servidor (os mesmos
@@ -1674,6 +1810,7 @@ pub const Gateway = struct {
         for (g.nonce_replies.items) |r| d = @min(d, r.at_ms);
         for (g.history_replies.items) |r| d = @min(d, r.at_ms);
         for (g.member_replies.items) |r| d = @min(d, r.at_ms);
+        for (g.search_replies.items) |r| d = @min(d, r.at_ms);
         // A fila do op 8 anda no relógio monotônico: aqui só importa quanto falta.
         const mono = monoMs();
         const out_at = g.member_out.due(mono);
@@ -1895,6 +2032,16 @@ pub const Gateway = struct {
             if (r.at_ms <= now) {
                 _ = g.member_replies.orderedRemove(i);
                 try g.membersChunk(r.req);
+            } else i += 1;
+        }
+        i = 0;
+        while (i < g.search_replies.items.len) {
+            const r = g.search_replies.items[i];
+            if (r.at_ms <= now) {
+                _ = g.search_replies.orderedRemove(i);
+                try g.searchChunk(r.seq);
+                // A resposta pode ter coberto a que esperava, ou soltado a fila.
+                try g.flushMembers();
             } else i += 1;
         }
         if (now >= g.next_flood_ms) {
@@ -3024,7 +3171,7 @@ fn buildHistory(channel: Id, now_ms: i64) ![]types.Message {
 pub const scripts_channel: Id = 502_008;
 pub const scripts_texts = [_][]const u8{
     "Հայերեն: Բարեւ ձեզ · Ελληνικά: Καλημέρα · Русский: Привет, мир · አማርኛ: ሰላም",
-    "ไทย: สวัสดีครับ · हिन्दी: नमस्ते दुनिया · ქართული: გამარჯობა",
+    "ไทย: สวัสดีครับ · हिन्दी: नमस्ते दुनिया · ქართული: გამარჯობა · ♡ ⛧",
 };
 
 /// #setups do "Zig Brasil" (onde somos da Moderação): uma mensagem de cada jeito

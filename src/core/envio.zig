@@ -37,6 +37,9 @@ pub const FileOpt = struct {
 /// Texto alternativo: o Discord aceita até 1024 caracteres.
 pub const max_alt = 1024;
 
+/// Limite do Discord para um arquivo de quem não tem Nitro.
+pub const max_upload: u64 = 10 * 1024 * 1024;
+
 /// Onde a próxima página de fixadas começa: o `pinned_at` da última que veio
 /// (ISO 8601, exatamente como o Discord mandou). Vazio = a primeira página.
 pub const PinCursor = struct {

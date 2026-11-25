@@ -26,6 +26,7 @@ seed() {
     printf 'som\n' > "$cfg/som.wav"
     printf '{"version":1,"reminders":[]}\n' > "$cfg/lembretes-123.json"
     printf 'cache\n' > "$cache/messages/1/2.bin"
+    mkdir -p "$cache/gif-favorites/123" && printf 'RIFF' > "$cache/gif-favorites/123/0123456789abcdef.webp"
     printf 'dll\n' > "$cache/ffmpeg/avcodec-61.dll"
     printf 'registro\n' > "$cache/debug.log"
     printf 'lsp\n' > "$cache/lsp-scratch/x/a.zig"
@@ -56,7 +57,7 @@ echo "$line" | grep -q ' 0 falharam' || { bad "a bateria falhou"; echo "$out" | 
 echo "$out" | grep -q 'encerramento demorou' && bad "só saiu pelo vigia de 3 s" || ok "saiu sem precisar do vigia"
 [ ! -e "$R/config/larpercord" ] && ok "a pasta das configurações sumiu" || { bad "sobrou a pasta das configurações:"; find "$R/config/larpercord" | sed 's/^/    /'; }
 [ ! -e "$R/config/larpercord/lembretes-123.json" ] && ok "os lembretes sumiram" || bad "sobrou o arquivo dos lembretes"
-[ ! -e "$R/cache/larpercord" ] && ok "a pasta do cache sumiu (FFmpeg, registro, mensagens)" || { bad "sobrou a pasta do cache:"; find "$R/cache/larpercord" | sed 's/^/    /'; }
+[ ! -e "$R/cache/larpercord" ] && ok "a pasta do cache sumiu (FFmpeg, registro, mensagens, clipes dos GIFs)" || { bad "sobrou a pasta do cache:"; find "$R/cache/larpercord" | sed 's/^/    /'; }
 [ ! -e "$R/home/.config/larpercord" ] && ok "o token antigo em ~/.config sumiu" || bad "sobrou o token antigo em ~/.config"
 [ -f "$R/fora/importante.txt" ] && ok "o que os links apontavam continua lá" || bad "apagou o que um link apontava"
 [ -f "$R/config/outro-app/keep.txt" ] && ok "a pasta de outro programa continua lá" || bad "apagou a pasta de outro programa"

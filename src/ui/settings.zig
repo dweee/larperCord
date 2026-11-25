@@ -17,6 +17,7 @@ const dropdown = @import("dropdown.zig");
 const tray = @import("../platform/tray.zig");
 const inbox = @import("inbox.zig");
 const mem_use_mod = @import("../core/mem_use.zig");
+const mem_partes = @import("../core/mem_partes.zig");
 const teclas = @import("teclas.zig");
 const atalhos_mod = @import("atalhos.zig");
 const sys = @import("../platform/sys.zig");
@@ -701,7 +702,7 @@ fn mascotPicker(p: *Page, value: *u8) void {
     const ch: f32 = 176;
     const light = ctx.col(.bg).luma() > 0.5;
     const reduce = ctx.st.settings.reduce_motion;
-    const names = [2][]const u8{ "Terminal", i18n.tr("Clássico", "Classic") };
+    const names = [2][]const u8{ i18n.tr("Terminal", "Terminal"), i18n.tr("Clássico", "Classic") };
     for (names, 0..) |name, i| {
         const r: d.Rect = .{ .x = p.x + @as(f32, @floatFromInt(i)) * (cw + gap), .y = p.y, .w = cw, .h = ch };
         const hb = d.hit(ctx, p.id(), r);
@@ -1007,7 +1008,7 @@ fn page(p: *Page, previews: []const Preview) void {
             p.toggleIf(i18n.tr("Espera você voltar", "Waits for you to come back"), i18n.tr("Com a janela sem foco, fica esperando; se você some por muito tempo, monta um acampamento. Na volta, corre até o mouse (e, depois de horas, diz que sentiu saudade).", "With the window unfocused, it waits; if you're gone a long time, it sets up camp. When you come back, it runs to the mouse (and, after hours away, says it missed you)."), &s.mascot_away, pet_on);
             const play_on = life_on and !s.reduce_motion;
             p.toggleIf(i18n.tr("Reage ao que você digita", "Reacts to what you type"), i18n.tr("Tapa as orelhas com tudo em MAIÚSCULAS, cobre os olhos com um ||spoiler||, põe óculos para revisar um bloco de código, segura um pergaminho numa mensagem longa (e se afasta preocupado perto do limite), aponta para a lista com @ e #, abre um terminalzinho com / no começo e oferece um chá quando você apaga muito. E tem uns segredos. Tudo olhando o texto aqui no computador.", "Covers its ears at ALL CAPS, covers its eyes at a ||spoiler||, puts on glasses to review a code block, holds a scroll for a long message (and pulls back worried near the limit), points at the lists for @ and #, opens a tiny terminal for / at the start and offers tea when you delete a lot. And it has a few secrets. All worked out from the text on your computer."), &s.mascot_typing, play_on);
-            p.toggleIf(i18n.tr("Brincadeiras", "Games"), i18n.tr("Às vezes rola um d20 quando você manda uma mensagem. Arraste um emoji do seletor ou de uma reação até ele e ele come; um link solto nele entra num portal e uma imagem vira um quadro. De vez em quando se esconde atrás de um painel: clique na pontinha das orelhas para achar. E reage a Ctrl+K, Ctrl+S, Ctrl+P, Ctrl+X, Ctrl+V e Esc, sem mudar o que as teclas fazem.", "Now and then it rolls a d20 when you send a message. Drag an emoji from the picker or a reaction onto it and it eats it; a link dropped on it goes into a portal and an image becomes a framed picture. Every so often it hides behind a panel: click the tips of its ears to find it. And it reacts to Ctrl+K, Ctrl+S, Ctrl+P, Ctrl+X, Ctrl+V and Esc, without changing what the keys do."), &s.mascot_games, play_on);
+            p.toggleIf(i18n.tr("Brincadeiras", "Tricks"), i18n.tr("Às vezes rola um d20 quando você manda uma mensagem. Arraste um emoji do seletor ou de uma reação até ele e ele come; um link solto nele entra num portal e uma imagem vira um quadro. De vez em quando se esconde atrás de um painel: clique na pontinha das orelhas para achar. E reage a Ctrl+K, Ctrl+S, Ctrl+P, Ctrl+X, Ctrl+V e Esc, sem mudar o que as teclas fazem.", "Now and then it rolls a d20 when you send a message. Drag an emoji from the picker or a reaction onto it and it eats it; a link dropped on it goes into a portal and an image becomes a framed picture. Every so often it hides behind a panel: click the tips of its ears to find it. And it reacts to Ctrl+K, Ctrl+S, Ctrl+P, Ctrl+X, Ctrl+V and Esc, without changing what the keys do."), &s.mascot_games, play_on);
             if (life_on and s.reduce_motion) p.note(i18n.tr("Com \"Reduzir movimento\" ligado (Acessibilidade), ele não reage ao que você digita nem brinca.", "With \"Reduce motion\" on (Accessibility), it doesn't react to what you type or play games."));
             p.heading(i18n.tr("Plantinha", "Little plant"));
             p.toggleIf(i18n.tr("Plantinha", "Little plant"), i18n.tr("Um vasinho do lado dele que ele rega e que cresce um pouco a cada dia em que você usa o app. Some por muito tempo e ela murcha, até ele regar de novo.", "A little pot next to it that it waters and that grows a bit each day you use the app. Stay away too long and it wilts, until it waters it again."), &s.mascot_plant, pet_on);
@@ -1037,6 +1038,7 @@ fn page(p: *Page, previews: []const Preview) void {
             p.toggle(i18n.tr("Abrir na primeira não lida", "Open at the first unread"), i18n.tr("Canal com mensagens novas abre nelas, como no Discord. Desligado, abre no fim.", "A channel with new messages opens at them, like Discord. When off, it opens at the bottom."), &s.open_at_unread);
             p.heading(i18n.tr("Caixa de texto", "Text box"));
             p.toggle(i18n.tr("Prévia do markdown", "Markdown preview"), i18n.tr("Com **negrito**, `código`, ||spoiler||…, mostra acima da caixa como vai ficar.", "With **bold**, `code`, ||spoilers||…, shows above the box how it will look."), &s.md_preview);
+            p.toggle(i18n.tr("Barra de formatação", "Formatting bar"), i18n.tr("Com texto selecionado na caixa, B e I aparecem em cima do trecho e colocam ** e * nas pontas dele.", "With text selected in the box, B and I appear above the selection and put ** and * around it."), &s.md_bar);
             {
                 var fk: [48]u8 = undefined;
                 var cd: [400]u8 = undefined;
@@ -1047,6 +1049,8 @@ fn page(p: *Page, previews: []const Preview) void {
             p.title(i18n.tr("Notificações", "Notifications"));
             p.note(i18n.tr("Para mensagens diretas e menções, quando você não está olhando a conversa.", "For direct messages and mentions, when you're not looking at the conversation."));
             p.toggle(i18n.tr("Notificações na área de trabalho", "Desktop notifications"), i18n.tr("Só com a janela fora de foco ou escondida na bandeja.", "Only while the window is unfocused or hidden in the tray."), &s.desktop_notifs);
+            p.toggleIf(i18n.tr("Responder pela notificação", "Reply from the notification"), i18n.tr("As notificações de mensagens ganham os botões Marcar como lida e Responder, que funcionam com a janela na bandeja. Onde a notificação tem caixa de texto (KDE Plasma, Windows), a resposta sai dali mesmo; nos outros, Responder abre a conversa com a resposta pronta.", "Message notifications get Mark as read and Reply buttons, which work with the window in the tray. Where the notification has a text box (KDE Plasma, Windows), the reply goes out from there; elsewhere, Reply opens the conversation ready to reply."), &s.notif_reply, s.desktop_notifs);
+            if (s.desktop_notifs and s.notif_reply) if (semBotoes()) |porque| p.note(porque);
             p.toggle(i18n.tr("Piscar na barra de tarefas", "Flash taskbar"), i18n.tr("A janela chama atenção até você voltar para ela.", "The window asks for attention until you come back."), &s.taskbar_flash);
             p.toggle(i18n.tr("Som de mensagem nova", "New message sound"), i18n.tr("Um aviso curto com mensagem direta e menção, também com a janela fora de foco ou na bandeja. Não toca na conversa que você está olhando nem em Não perturbe.", "A short cue for direct messages and mentions, also while the window is unfocused or in the tray. Silent for the conversation you're looking at and in Do Not Disturb."), &s.message_sound);
             // O som em si: o mesmo da página Voz (embutido, arquivo seu, volume e Ouvir).
@@ -1056,6 +1060,7 @@ fn page(p: *Page, previews: []const Preview) void {
         .privacidade => {
             p.title(i18n.tr("Privacidade", "Privacy"));
             p.toggle(i18n.tr("Enviar indicador de digitação", "Send typing indicator"), i18n.tr("Os outros veem \"digitando…\" enquanto você escreve.", "Others see \"typing…\" while you write."), &s.send_typing);
+            p.toggle(i18n.tr("Tirar a localização e os dados da câmera de fotos e vídeos", "Remove location and camera details from photos and videos"), i18n.tr("Vai uma cópia sem o GPS, o modelo da câmera e o resto que fica escondido no arquivo (JPEG, PNG, WebP, MP4 e MOV). O arquivo no seu computador não muda.", "A copy goes without the GPS, the camera model and the rest hidden in the file (JPEG, PNG, WebP, MP4 and MOV). The file on your computer stays as it is."), &s.strip_metadata);
             p.toggle(i18n.tr("Compartilhar minha atividade (Rich Presence)", "Share my activity (Rich Presence)"), i18n.tr("Jogos e apps com Rich Presence mostram o que você está fazendo, como no Discord do computador. Desligado, nada fica escutando.", "Games and apps with Rich Presence show what you're doing, like the Discord desktop app. Off: nothing listens."), &s.rich_presence);
             @import("settings_jogos.zig").section(p);
             p.toggle(i18n.tr("Animar GIFs do Tenor e do Giphy", "Animate Tenor and Giphy GIFs"), i18n.tr("Baixa do site deles, que vê o seu IP (o app oficial faz igual). Desligado: prévia parada pelo Discord.", "Downloads from their site, which sees your IP (the official app does too). Off: still preview via Discord."), &s.gif_hosts);
@@ -1070,10 +1075,11 @@ fn page(p: *Page, previews: []const Preview) void {
             {
                 const msg_cache = @import("../net/msg_cache.zig");
                 const busca = @import("../net/busca_local.zig").stats();
+                const gif_clips = @import("gif_clips.zig");
                 var sb: [24]u8 = undefined;
                 var lb: [64]u8 = undefined;
-                // O índice da busca vai junto com o cache.
-                const size = msg_cache.formatSize(&sb, msg_cache.totalBytes() + busca.disk, i18n.en());
+                // O índice da busca e os clipes dos GIFs favoritos vão junto com o cache.
+                const size = msg_cache.formatSize(&sb, msg_cache.totalBytes() + busca.disk + gif_clips.totalBytes(), i18n.en());
                 if (p.button(i18n.fmt(&lb, "Apagar cache ({s})", "Clear cache ({s})", .{size}), true)) ctx.act(.clear_cache);
                 p.y += 8;
                 var db: [24]u8 = undefined;
@@ -1082,6 +1088,12 @@ fn page(p: *Page, previews: []const Preview) void {
                 const y0 = p.y;
                 p.note(i18n.fmt(&nb, "Busca neste computador: {d} mensagens, {s} no disco, {s} na memória.", "Search on this computer: {d} messages, {s} on disk, {s} in memory.", .{ busca.docs, msg_cache.formatSize(&db, busca.disk, i18n.en()), msg_cache.formatSize(&mb, busca.mem, i18n.en()) }));
                 qa.mark(.{ .x = p.x, .y = y0, .w = p.w, .h = p.y - y0 }, "search-index-stats", .{});
+                const gs = gif_clips.stats();
+                var gb: [24]u8 = undefined;
+                var gn: [200]u8 = undefined;
+                const y1 = p.y;
+                p.note(i18n.fmt(&gn, "GIFs favoritos guardados para abrir na hora: {d}, {s} no disco.", "Favorite GIFs kept to open instantly: {d}, {s} on disk.", .{ gs.clips, msg_cache.formatSize(&gb, gs.bytes, i18n.en()) }));
+                qa.mark(.{ .x = p.x, .y = y1, .w = p.w, .h = p.y - y1 }, "gif-clips-stats", .{});
             }
             p.note(i18n.tr("Fora isso, imagens e avatares só vêm dos servidores do Discord.", "Everything else (images, avatars) only comes from Discord's servers."));
             p.divider();
@@ -1150,6 +1162,13 @@ fn page(p: *Page, previews: []const Preview) void {
                 p.note(i18n.tr("Indisponível: nenhum painel do sistema mostra ícones agora (StatusNotifier), então fechar a janela encerra o app. Com a opção ligada, o ícone aparece quando houver um.", "Unavailable: no system panel shows icons right now (StatusNotifier), so closing the window quits the app. While on, the icon appears once there is one."));
                 qa.mark(.{ .x = p.x, .y = y0, .w = p.w, .h = p.y - y0 }, "tray-unavailable", .{});
             }
+            // A porta do `larpercord ctl` (app_ctl.zig) abre e fecha com a opção. Na
+            // demonstração ela só existe com LARPER_CTL (os testes usam).
+            if (!sys.web) {
+                const ctl_ok = @import("../platform/ctl.zig").allowed;
+                p.toggleIf(i18n.tr("Controle externo (larpercord ctl)", "External control (larpercord ctl)"), i18n.tr("Scripts e atalhos do sistema controlam o app aberto com o larpercord ctl: mutar, aperte para falar, mostrar a janela, abrir um canal, contar as não lidas. Só o seu usuário deste computador consegue usar.", "Scripts and system shortcuts control the running app with larpercord ctl: mute, push to talk, show the window, open a channel, count unread messages. Only your user on this computer can use it."), &s.external_control, ctl_ok);
+                if (!ctl_ok) p.note(i18n.tr("Na demonstração, só com LARPER_CTL=1 (para testes).", "In the demo, only with LARPER_CTL=1 (for testing)."));
+            }
             textSection(p);
             debugSection(p);
             dataSection(p);
@@ -1163,6 +1182,22 @@ fn page(p: *Page, previews: []const Preview) void {
         .atualizacoes => @import("settings_update.zig").draw(p),
         .novidades => @import("settings_update.zig").changelog(p),
         .sobre => about(p),
+    }
+}
+
+/// Os botões das notificações não aparecem aqui: por quê. Nulo: aparecem (ou nenhuma
+/// notificação saiu ainda para saber).
+fn semBotoes() ?[]const u8 {
+    if (sys.windows) {
+        if (!@import("../platform/notif_win.zig").recusado()) return null;
+        return i18n.tr("O Windows não aceitou as notificações com botões: elas saem como antes, sem botões.", "Windows didn't accept notifications with buttons: they go out as before, without buttons.");
+    } else {
+        const dbus = @import("../platform/notif_dbus.zig");
+        return switch (dbus.estado()) {
+            .pronto => if (dbus.caps().acoes) null else i18n.tr("O servidor de notificações deste sistema não mostra botões.", "This system's notification server doesn't show buttons."),
+            .sem, .sem_servidor => i18n.tr("Sem um servidor de notificações pelo D-Bus, elas saem pelo notify-send, sem botões.", "Without a notification server on D-Bus, they go out through notify-send, without buttons."),
+            .parado, .conectando => null,
+        };
     }
 }
 
@@ -1392,10 +1427,52 @@ fn mbText(buf: []u8, prefix: []const u8, kb: u64) []const u8 {
 /// Varrer a conta custa: basta de vez em quando, e só com a página aberta.
 pub var mem_use: mem_use_mod.MemUse = .{};
 var mem_use_ms: i64 = 0;
+/// A última divisão mostrada (o QA confere que as partes somam o total).
+pub var mem_partes_vistas: mem_partes.Partes = .{};
+
+/// O nome de cada parte da RAM (core/mem_partes.zig) na página.
+fn parteLabel(buf: []u8, x: mem_partes.Parte) []const u8 {
+    return switch (x) {
+        .programa => i18n.tr("Programa (o executável)", "Program (the executable)"),
+        .bibliotecas => i18n.tr("Bibliotecas do sistema", "System libraries"),
+        .fontes => i18n.tr("Fontes", "Fonts"),
+        .driver => i18n.tr("Driver de vídeo", "Video driver"),
+        .arquivos => i18n.tr("Outros arquivos", "Other files"),
+        .pilhas => i18n.tr("Pilhas das threads", "Thread stacks"),
+        .sdl => i18n.tr("Janela e texturas (SDL)", "Window and textures (SDL)"),
+        .imgui => i18n.tr("Interface (Dear ImGui)", "Interface (Dear ImGui)"),
+        .freetype => i18n.tr("Letras (FreeType)", "Glyphs (FreeType)"),
+        .curl => i18n.tr("Conexões (curl)", "Connections (curl)"),
+        .openssl => i18n.tr("Criptografia (OpenSSL)", "Encryption (OpenSSL)"),
+        .lua => i18n.tr("Plugins (Lua)", "Plugins (Lua)"),
+        .mensagens => i18n.fmt(buf, "Mensagens ({d})", "Messages ({d})", .{mem_use.n_messages}),
+        .pessoas => i18n.fmt(buf, "Pessoas ({d})", "People ({d})", .{mem_use.n_people}),
+        .lugares => i18n.fmt(buf, "Servidores ({d}) e canais ({d})", "Servers ({d}) and channels ({d})", .{ mem_use.n_guilds, mem_use.n_channels }),
+        .resto_heap => i18n.tr("O resto do app e das bibliotecas", "The rest of the app and libraries"),
+        .heap_livre => i18n.tr("Heap livre, ainda não devolvido", "Free heap, not returned yet"),
+        .anonima => if (mem_partes_vistas.tem[@intFromEnum(mem_partes.Parte.resto_heap)])
+            i18n.tr("Fora do malloc (driver de vídeo e bibliotecas)", "Outside malloc (video driver and libraries)")
+        else
+            i18n.tr("O resto (o app, o driver de vídeo e o sistema)", "The rest (the app, the video driver and the system)"),
+    };
+}
+
+/// Uma linha da divisão: as do heap ocupado entram recuadas, embaixo da linha dele.
+fn parteRow(p: *Page, h: f32, label: []const u8, value: []const u8, recuo: bool) void {
+    const x0 = p.x;
+    const w0 = p.w;
+    if (recuo) {
+        p.x += 24;
+        p.w -= 24;
+    }
+    statRow(p, h, label, value);
+    p.x = x0;
+    p.w = w0;
+}
 
 fn memoryRows(p: *Page) void {
     const ctx = p.ctx;
-    const row_h = 44;
+    const row_h = 40;
     if (ctx.now_ms - mem_use_ms >= 2000 or ctx.now_ms < mem_use_ms) {
         mem_use_ms = ctx.now_ms;
         mem_use = mem_use_mod.of(ctx.store);
@@ -1403,21 +1480,27 @@ fn memoryRows(p: *Page) void {
     var l: [64]u8 = undefined;
     var v: [32]u8 = undefined;
     p.heading(i18n.tr("Para onde vai a memória", "Where the memory goes"));
-    statRow(p, row_h, i18n.fmt(&l, "Imagens ({d})", "Images ({d})", .{ctx.images.readyCount()}), mbText(&v, "", ctx.images.bytes / 1024));
-    statRow(p, row_h, i18n.fmt(&l, "Mensagens ({d})", "Messages ({d})", .{mem_use.n_messages}), mbText(&v, "~", mem_use.messages / 1024));
-    statRow(p, row_h, i18n.fmt(&l, "Pessoas ({d})", "People ({d})", .{mem_use.n_people}), mbText(&v, "~", mem_use.people / 1024));
-    statRow(p, row_h, i18n.fmt(&l, "Servidores ({d}) e canais ({d})", "Servers ({d}) and channels ({d})", .{ mem_use.n_guilds, mem_use.n_channels }), mbText(&v, "~", mem_use.places / 1024));
-    if (ctx.io.*.Fonts.*.TexData) |tex| statRow(p, row_h, i18n.tr("Atlas de fontes", "Font atlas"), mbText(&v, "", @as(u64, @intCast(tex.*.Width * tex.*.Height * tex.*.BytesPerPixel)) / 1024));
-    // O que este sistema não informa fica de fora, em vez de aparecer zerado.
-    const used = @atomicLoad(u32, &ctx.stats.heap_used_kb, .monotonic);
-    const free = @atomicLoad(u32, &ctx.stats.heap_free_kb, .monotonic);
-    const file = @atomicLoad(u32, &ctx.stats.file_kb, .monotonic);
-    if (used > 0) {
-        statRow(p, row_h, i18n.tr("Alocada no total", "Allocated in total"), mbText(&v, "", used));
-        statRow(p, row_h, i18n.tr("Livre, ainda não devolvida", "Free, not returned yet"), mbText(&v, "", free));
+    const pt = @import("../app_memoria.zig").partes(mem_use);
+    mem_partes_vistas = pt;
+    if (pt.total_kb == 0) {
+        p.note(i18n.tr("Medindo…", "Measuring…"));
+        return;
     }
-    if (file > 0) statRow(p, row_h, i18n.tr("Driver, bibliotecas e fontes", "Driver, libraries and fonts"), mbText(&v, "", file));
-    p.note(i18n.tr("Com ~ é estimativa. As imagens podem estar na memória da placa de vídeo, e não na RAM.", "Values with ~ are estimates. Images may live in video memory rather than RAM."));
+    var heap_aberto = false;
+    for (std.enums.values(mem_partes.Parte)) |x| {
+        if (!pt.tem[@intFromEnum(x)]) continue;
+        // O heap ocupado (só com o mapa: fora do Linux não se sabe o que é heap).
+        if (x.doHeap() and !heap_aberto and pt.tem[@intFromEnum(mem_partes.Parte.resto_heap)]) {
+            heap_aberto = true;
+            statRow(p, row_h, i18n.tr("Heap em uso (malloc)", "Heap in use (malloc)"), mbText(&v, "", pt.heapUsado()));
+        }
+        const est = x == .mensagens or x == .pessoas or x == .lugares;
+        parteRow(p, row_h, parteLabel(&l, x), mbText(&v, if (est) "~" else "", pt.get(x)), x.doHeap() and heap_aberto);
+    }
+    statRow(p, row_h, if (sys.windows) i18n.tr("Total (memória privada)", "Total (private memory)") else i18n.tr("Total (PSS, a soma das partes)", "Total (PSS, the sum of the parts)"), mbText(&v, "", pt.soma()));
+    p.note(i18n.tr("Cada parte sai do mapa de memória do processo e do que o malloc e as bibliotecas contam, e as partes somam o total. Com ~ é estimativa (o resto do heap fica com a diferença).", "Each part comes from the process memory map and from what malloc and the libraries count, and the parts add up to the total. Values with ~ are estimates (the rest of the heap gets the difference)."));
+    statRow(p, row_h, i18n.fmt(&l, "Imagens ({d})", "Images ({d})", .{ctx.images.readyCount()}), mbText(&v, "", ctx.images.bytes / 1024));
+    p.note(i18n.tr("As imagens ficam na memória da placa de vídeo, fora da conta acima; no renderizador por software, elas são parte do SDL.", "Images live in video memory, outside the count above; with the software renderer, they are part of SDL."));
 }
 
 fn performance(p: *Page) void {
@@ -1567,6 +1650,14 @@ fn debugSection(p: *Page) void {
         }
     }
     p.note(i18n.tr("O token nunca entra no arquivo. Ele traz IDs de canais e servidores, nomes de arquivos de mídia e dados da chamada, então dê uma olhada antes de mandar.", "Your token never goes in the file. It has channel and server IDs, media file names and call data, so take a look before you send it."));
+    // O Inspetor (src/inspect/): ver os elementos, a rede, o gateway e o log com o app aberto.
+    var ib: [96]u8 = undefined;
+    var kb: [32]u8 = undefined;
+    if (p.buttonSoft(i18n.fmt(&ib, "Abrir o Inspetor ({s})", "Open the Inspector ({s})", .{teclas.first(&ctx.st.teclas, .inspetor, &kb)}))) {
+        ctx.act(.close_settings);
+        @import("../inspect/ui.zig").open();
+    }
+    p.note(i18n.tr("Ferramentas de desenvolvedor: clicar num elemento e ver de que linha do tema ele vem, o que saiu e chegou da rede e do gateway (sem o token), o log e o custo de cada quadro. Fica só na memória.", "Developer tools: click an element to see which theme line it comes from, what went to and came from the network and the gateway (without your token), the log and the cost of each frame. Stays in memory only."));
     challengeCounts(p);
 }
 

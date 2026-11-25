@@ -582,8 +582,8 @@ pub const Reaction = struct {
     }
 };
 
-/// Imagem colada ou áudio gravado na caixa: um arquivo temporário nosso, apagado
-/// depois de enviado (ou tirado da bandeja).
+/// Imagem colada, imagem editada na bandeja ou áudio gravado na caixa: um arquivo
+/// temporário nosso, apagado depois de enviado (ou tirado da bandeja).
 pub fn isPastedFile(path: []const u8) bool {
     const cut = lastSep(path);
     const name = path[(if (cut) |i| i + 1 else 0)..];
@@ -592,11 +592,23 @@ pub fn isPastedFile(path: []const u8) bool {
     // Discord (ui/gravar_audio.zig).
     const dir = path[0 .. cut orelse return false];
     const parent = dir[(if (lastSep(dir)) |i| i + 1 else 0)..];
-    return std.mem.startsWith(u8, parent, recorded_dir_prefix);
+    return std.mem.startsWith(u8, parent, recorded_dir_prefix) or isPrivateFile(path);
 }
 
 /// A pasta temporária dos áudios gravados na caixa (mais o PID).
 pub const recorded_dir_prefix = "larpercord-gravacoes-";
+
+/// A pasta temporária só nossa (platform/temporarios.zig), mais o PID: cada arquivo
+/// numa subpasta numerada, com o nome que vai para o Discord.
+pub const private_dir_prefix = "larpercord-privados-";
+
+/// Mora numa subpasta da pasta privada: <temp>/larpercord-privados-<pid>/<n>/<nome>.
+pub fn isPrivateFile(path: []const u8) bool {
+    const dir = path[0 .. lastSep(path) orelse return false];
+    const up = dir[0 .. lastSep(dir) orelse return false];
+    const name = up[(if (lastSep(up)) |i| i + 1 else 0)..];
+    return std.mem.startsWith(u8, name, private_dir_prefix);
+}
 
 fn lastSep(path: []const u8) ?usize {
     return std.mem.lastIndexOfAny(u8, path, "/\\");
@@ -610,6 +622,11 @@ test "arquivos temporários nossos: imagem colada e áudio gravado" {
     try std.testing.expect(!isPastedFile("/home/a/Música/audio-2026-11-17-1432.ogg"));
     try std.testing.expect(!isPastedFile("/home/a/larpercord-gravacoes-77"));
     try std.testing.expect(!isPastedFile("audio.ogg"));
+    // Colada, editada ou limpa: numa subpasta da pasta privada, com o nome de antes.
+    try std.testing.expect(isPastedFile("/run/user/1000/larpercord-privados-77/3/IMG_2034.png"));
+    try std.testing.expect(isPrivateFile("C:\\Temp/larpercord-privados-9/12/print.png"));
+    try std.testing.expect(!isPrivateFile("/run/user/1000/larpercord-privados-77/IMG_2034.png"));
+    try std.testing.expect(!isPrivateFile("/home/a/Imagens/foto.jpg"));
 }
 
 /// Timestamp embutido num snowflake do Discord (ms desde 2015-01-01).
