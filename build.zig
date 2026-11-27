@@ -101,6 +101,20 @@ fn addFribidi(b: *std.Build, m: *std.Build.Module) void {
     });
 }
 
+/// mimalloc (third_party/mimalloc) no lugar do malloc do sistema, com -Dmimalloc: o executável
+/// define malloc, free e o resto, e no Linux as bibliotecas do sistema (SDL, curl, FreeType...)
+/// também alocam com ele. No Windows só o que está dentro do .exe; o que a DLL do C aloca
+/// sozinha continua com ela, e um free de lá que viesse para cá é recusado (MI_FREE_IS_CHECKED)
+/// em vez de estragar o heap. O src/platform/mem_mi.c dá a devolução e os números do heap.
+fn addMimalloc(b: *std.Build, m: *std.Build.Module) void {
+    const windows = m.resolved_target.?.result.os.tag == .windows;
+    m.addIncludePath(b.path("third_party/mimalloc/include"));
+    const base = [_][]const u8{ "-std=gnu11", "-O2", "-DNDEBUG", "-DMI_MALLOC_OVERRIDE", "-fno-builtin-malloc", "-Wno-unknown-pragmas", "-fno-sanitize=undefined" };
+    const flags: []const []const u8 = if (windows) &(base ++ [_][]const u8{"-DMI_FREE_IS_CHECKED=1"}) else &(base ++ [_][]const u8{ "-fvisibility=hidden", "-ftls-model=initial-exec" });
+    m.addCSourceFile(.{ .file = b.path("third_party/mimalloc/src/static.c"), .flags = flags });
+    m.addCSourceFile(.{ .file = b.path("src/platform/mem_mi.c"), .flags = &.{ "-std=gnu11", "-O2" } });
+}
+
 /// Windows: FreeType compilado junto (o baixado por tools/windows_deps.sh).
 const freetype_sources = [_][]const u8{
     "base/ftsystem.c", "base/ftinit.c",    "base/ftdebug.c",     "base/ftbase.c",  "base/ftbbox.c",  "base/ftbitmap.c",
@@ -159,6 +173,14 @@ pub fn build(b: *std.Build) void {
     const qa = b.option(bool, "qa", "Inclui o robô de QA (--qa); padrão: só no debug") orelse !release;
     const build_options = b.addOptions();
     build_options.addOption(bool, "qa", qa);
+    // O Discord de mentira em 127.0.0.1 (QA_SUITE=rede e conta-grande) só troca o endereço no
+    // debug. -Dqa-rede (com -Dqa) deixa trocar também num build otimizado, para medir a RAM
+    // com o alocador e o código da release (tools/ram_conta_grande.sh). Nunca nas releases.
+    const qa_rede = b.option(bool, "qa-rede", "Com -Dqa num build otimizado: o QA de rede e o da conta grande no Discord de mentira local") orelse false;
+    build_options.addOption(bool, "qa_rede", qa and qa_rede);
+    // O alocador (ver addMimalloc): o malloc do sistema por padrão.
+    const mimalloc = b.option(bool, "mimalloc", "Usa o mimalloc (third_party/mimalloc) no lugar do malloc do sistema") orelse false;
+    build_options.addOption(bool, "mimalloc", mimalloc);
     // O TLS do Chrome (src/platform/tls_chrome.c) mexe no OpenSSL do curl: só onde ele é
     // o mesmo que o app liga. O libcurl oficial do Windows traz o dele por dentro.
     const tls_chrome = target.result.os.tag != .windows or single_exe;
@@ -200,6 +222,7 @@ pub fn build(b: *std.Build) void {
         translate.linkSystemLibrary("zlib", .{});
         translate.linkSystemLibrary("libwebp", .{});
         translate.linkSystemLibrary("libwebpdemux", .{});
+        translate.linkSystemLibrary("libwebpmux", .{});
         translate.linkSystemLibrary("opus", .{});
     }
 
@@ -245,6 +268,9 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(b.path("third_party/libdave/src"));
     mod.addCMacro("IMGUI_ENABLE_FREETYPE", "1");
     mod.addCMacro("IMGUI_USE_WCHAR32", "1"); // emojis fora do plano básico (😂, 🌸...)
+    // Os ganchos de item do ImGui, para o Inspetor (src/inspect/ganchos.cpp): desligados,
+    // cada item paga a leitura de um booleano.
+    mod.addCMacro("IMGUI_ENABLE_TEST_ENGINE", "1");
     // Janela de métricas e log de depuração: ninguém abre (dcimgui ainda cita
     // duas funções deles, então só onde o ligador joga fora o que não é usado).
     if (release and !windows) mod.addCMacro("IMGUI_DISABLE_DEBUG_TOOLS", "1");
@@ -270,6 +296,9 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("third_party/imgui/imgui_demo.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", "-DIMGUI_DISABLE_DEMO_WINDOWS" } });
 
     mod.addCSourceFile(.{ .file = b.path("src/ui/font_metrics.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" } });
+    // A memória de cada biblioteca grande (src/platform/mem_contas.zig).
+    mod.addCSourceFile(.{ .file = b.path("src/platform/mem_contas.c"), .flags = if (mimalloc) &.{ "-std=gnu11", "-O2", "-DLARPER_MIMALLOC" } else &.{ "-std=gnu11", "-O2" } });
+    mod.addCSourceFile(.{ .file = b.path("src/inspect/ganchos.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" } });
 
     // Decodificador de imagens (PNG/JPEG/GIF) dos anexos; WebP vem da libwebp.
     mod.addIncludePath(b.path("third_party/stb"));
@@ -336,6 +365,7 @@ pub fn build(b: *std.Build) void {
     addRnnoise(b, mod);
     addFribidi(b, mod);
     addDrLibs(b, mod, &.{});
+    if (mimalloc) addMimalloc(b, mod);
     if (windows) {
         const ft = win_deps.path(b, "src/freetype");
         mod.addIncludePath(ft.path(b, "include"));
@@ -361,7 +391,9 @@ pub fn build(b: *std.Build) void {
         } else {
             for ([_][]const u8{ "SDL3.dll", "curl.dll", "crypto.dll" }) |l| mod.linkSystemLibrary(l, .{ .use_pkg_config = .no });
         }
-        for ([_][]const u8{ "opus", "z", "webp", "webpdemux", "sharpyuv" }) |l| mod.linkSystemLibrary(l, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
+        // webpmux: o codificador de WebP animado dos clipes dos GIFs favoritos (vem no mesmo
+        // pacote da libwebp de tools/windows_deps.sh).
+        for ([_][]const u8{ "opus", "z", "webpmux", "webp", "webpdemux", "sharpyuv" }) |l| mod.linkSystemLibrary(l, .{ .use_pkg_config = .no, .preferred_link_mode = .static });
         for ([_][]const u8{ "ws2_32", "advapi32", "crypt32", "shell32", "ole32", "bcrypt", "user32" }) |l| mod.linkSystemLibrary(l, .{ .use_pkg_config = .no });
         if (!single_exe) for ([_][]const u8{ "SDL3.dll", "libcurl-x64.dll", "libcrypto-3-x64.dll" }) |dll| b.getInstallStep().dependOn(&b.addInstallBinFile(win_deps.path(b, b.pathJoin(&.{ "bin", dll })), dll).step);
     } else {
@@ -372,6 +404,12 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("zlib", .{});
         mod.linkSystemLibrary("libwebp", .{});
         mod.linkSystemLibrary("libwebpdemux", .{});
+        // O codificador de WebP animado dos clipes dos GIFs favoritos. No portátil, estático
+        // (o libwebp-dev do Ubuntu traz o .a): o binário não passa a exigir a libwebpmux, que
+        // nem toda distro instala junto com a libwebp.
+        if (portable) {
+            mod.linkSystemLibrary("webpmux", .{ .use_pkg_config = .no, .preferred_link_mode = .static, .search_strategy = .mode_first });
+        } else mod.linkSystemLibrary("libwebpmux", .{});
         mod.linkSystemLibrary("opus", .{});
         mod.linkSystemLibrary("crypto", .{ .preferred_link_mode = if (portable) .static else .dynamic });
         // A libssl do curl: o TLS do Chrome mexe no SSL_CTX dele (src/platform/tls_chrome.c).
@@ -429,6 +467,10 @@ pub fn build(b: *std.Build) void {
         test_mod.linkSystemLibrary("crypto", .{});
     }
     addDrLibs(b, test_mod, &.{});
+    // O stb_image (vendorizado, sem biblioteca do sistema): os testes de core/metadados.zig e
+    // core/png_escrita.zig abrem de volta o que sai de lá.
+    test_mod.addIncludePath(b.path("third_party/stb"));
+    test_mod.addCSourceFile(.{ .file = b.path("third_party/stb/stb_image.c"), .flags = &.{"-O2"} });
     const tests = b.addTest(.{ .root_module = test_mod });
     b.step("test", "Roda os testes").dependOn(&b.addRunArtifact(tests).step);
 
@@ -518,6 +560,7 @@ fn addWeb(b: *std.Build, native_c: *std.Build.Module, themes_mod: *std.Build.Mod
         m.addCSourceFiles(.{ .root = b.path("third_party"), .files = &web_cxx_sources, .flags = flags });
         m.addCSourceFile(.{ .file = b.path("third_party/imgui/imgui_demo.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", "-DIMGUI_DISABLE_DEMO_WINDOWS" } });
         m.addCSourceFile(.{ .file = b.path("src/ui/font_metrics.cpp"), .flags = flags });
+        m.addCSourceFile(.{ .file = b.path("src/inspect/ganchos.cpp"), .flags = flags });
         m.addCSourceFile(.{ .file = b.path("third_party/stb/stb_image.c"), .flags = &.{"-O2"} });
         m.addCSourceFile(.{ .file = b.path("src/platform/web/stubs.c"), .flags = &.{"-std=gnu99"} });
         addLua(b, m);
@@ -574,6 +617,7 @@ fn addWeb(b: *std.Build, native_c: *std.Build.Module, themes_mod: *std.Build.Mod
     cm.addIncludePath(host_dir);
     cm.addCMacro("IMGUI_ENABLE_FREETYPE", "1");
     cm.addCMacro("IMGUI_USE_WCHAR32", "1");
+    cm.addCMacro("IMGUI_ENABLE_TEST_ENGINE", "1");
     // libc++ antes dos cabeçalhos do clang que o Zig põe na frente (-I vem antes de -isystem).
     const cxx = b.fmt("-I{s}", .{b.pathJoin(&.{ sys_inc, "c++", "v1" })});
     const c_inc = b.fmt("-isystem{s}", .{sys_inc});
@@ -582,6 +626,7 @@ fn addWeb(b: *std.Build, native_c: *std.Build.Module, themes_mod: *std.Build.Mod
     cm.addCSourceFiles(.{ .root = b.path("third_party"), .files = &web_cxx_sources, .flags = cxx_flags });
     cm.addCSourceFile(.{ .file = b.path("third_party/imgui/imgui_demo.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti", cxx, c_inc, "-DIMGUI_DISABLE_DEMO_WINDOWS" } });
     cm.addCSourceFile(.{ .file = b.path("src/ui/font_metrics.cpp"), .flags = cxx_flags });
+    cm.addCSourceFile(.{ .file = b.path("src/inspect/ganchos.cpp"), .flags = cxx_flags });
     cm.addCSourceFile(.{ .file = b.path("third_party/stb/stb_image.c"), .flags = &.{ "-O2", c_inc } });
     cm.addCSourceFile(.{ .file = b.path("src/platform/web/stubs.c"), .flags = &.{ "-std=gnu99", c_inc } });
     // Lua com o setjmp/longjmp do Emscripten (o mesmo que o emcc liga por padrão).
@@ -650,6 +695,8 @@ fn addWeb(b: *std.Build, native_c: *std.Build.Module, themes_mod: *std.Build.Mod
 fn webModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, c_mod: *std.Build.Module, themes_mod: *std.Build.Module, examples_mod: *std.Build.Module) *std.Build.Module {
     const options = b.addOptions();
     options.addOption(bool, "qa", false);
+    options.addOption(bool, "qa_rede", false);
+    options.addOption(bool, "mimalloc", false);
     options.addOption(bool, "tls_chrome", false);
     options.addOption(bool, "single_exe", false);
     options.addOption([]const u8, "version", @import("src/core/version.zig").number);
@@ -677,6 +724,7 @@ fn webModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     for ([_][]const u8{ "third_party/imgui", "third_party/imgui/backends", "third_party/dcimgui", "third_party/dcimgui/backends", "third_party/stb", "third_party/libdave/includes" }) |p| m.addIncludePath(b.path(p));
     m.addCMacro("IMGUI_ENABLE_FREETYPE", "1");
     m.addCMacro("IMGUI_USE_WCHAR32", "1");
+    m.addCMacro("IMGUI_ENABLE_TEST_ENGINE", "1");
     return m;
 }
 

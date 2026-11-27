@@ -7,6 +7,7 @@
 //! Só baixa de domínios do Discord: um link qualquer na conversa não faz o
 //! app se conectar a outro servidor (o que vazaria o seu IP).
 const std = @import("std");
+const insp = @import("../inspect/registros.zig");
 const c = @import("c");
 const sys = @import("../platform/sys.zig");
 const Queue = @import("../net/queue.zig").Queue;
@@ -18,14 +19,23 @@ const proxiedUrl = media_url.proxiedUrl;
 const apng = @import("apng.zig");
 const ffmpeg = @import("../platform/ffmpeg.zig");
 const proxy = @import("../net/proxy.zig");
+const enderecos = @import("../net/enderecos.zig");
 const janela = @import("../core/janela.zig");
 const quadros = @import("../core/gif_quadros.zig");
 const gif_stream = @import("gif_stream.zig");
 
 const alloc = std.heap.c_allocator;
 
-/// Tempo até soltar uma imagem fora da tela.
-const idle_ms: i64 = 60_000;
+/// Tempo até soltar uma imagem fora da tela (com a janela aberta: ver `evict`).
+pub const idle_ms: i64 = 60_000;
+/// O QA adianta o relógio das imagens para conferir o `idle_ms` sem esperar um minuto
+/// (como o `qa_skew_ms` dos lembretes). Fora do QA é sempre 0.
+pub var qa_skew_ms: i64 = 0;
+
+/// A hora do relógio das imagens (`Cache.now_ms` e `drawn_ms`) para a hora de agora.
+pub fn clockMs(real_ms: i64) i64 {
+    return real_ms + qa_skew_ms;
+}
 /// Maior arquivo que a gente baixa (o Discord aceita até 10 MB sem Nitro).
 const max_download: usize = 32 * 1024 * 1024;
 /// Limite de uma animação (GIF, WebP, APNG) já reduzida. Passando disso, GIF e WebP
@@ -78,6 +88,9 @@ pub const Entry = struct {
     stream: ?*gif_stream.Stream = null,
     /// A cor dela por alto (`tintOf`), com o bit 24 ligado; 0 = não deu.
     tint: u32 = 0,
+    /// Sem renderizador (a janela na bandeja, `Cache.detach`): a imagem parada em pixels
+    /// (RGBA, w×h), no lugar da textura, até ser desenhada de novo (`unpark`).
+    parked: []u8 = &.{},
 
     fn free(e: *Entry) void {
         for (e.frames) |f| c.SDL_DestroyTexture(f.tex);
@@ -85,10 +98,18 @@ pub const Entry = struct {
         e.frames = &.{};
         if (e.stream) |st| gif_stream.release(st);
         e.stream = null;
+        if (e.parked.len > 0) alloc.free(e.parked);
+        e.parked = &.{};
     }
 
     fn animated(e: *const Entry) bool {
         return e.frames.len > 1 or e.stream != null;
+    }
+
+    /// Quadros para a regra de `janela.keepsImageHidden` (a guardada em pixels é um).
+    fn frameCount(e: *const Entry) usize {
+        if (e.animated()) return 2;
+        return if (e.parked.len > 0) 1 else e.frames.len;
     }
 
     /// Nunca 0 (é divisor): `add`, `halve` e `pump` somam saturando.
@@ -132,20 +153,29 @@ const Job = struct {
     url: []u8,
     max_w: u16,
     max_h: u16,
+    /// Animação que toca sempre decodificando aos poucos (os clipes dos favoritos,
+    /// ui/gif_clips.zig): só o anel fica na memória, por menor que ela seja.
+    stream: bool = false,
 };
 
 /// Quadros decodificados (RGBA, w×h cada), no c_allocator.
-const Pixels = struct {
+pub const Pixels = struct {
     frames: []PixFrame = &.{},
     w: u16 = 0,
     h: u16 = 0,
     /// Animação que vai tocar aos poucos: `frames` tem só o primeiro quadro.
     seed: ?gif_stream.Seed = null,
 
-    fn deinit(p: Pixels) void {
+    pub fn deinit(p: Pixels) void {
         for (p.frames) |f| alloc.free(f.data);
         if (p.frames.len > 0) alloc.free(p.frames);
         if (p.seed) |sd| alloc.free(sd.data);
+    }
+
+    fn bytes(p: Pixels) usize {
+        var n: usize = 0;
+        for (p.frames) |f| n += f.data.len;
+        return n;
     }
 
     /// Uma imagem só.
@@ -159,7 +189,7 @@ const Pixels = struct {
     }
 };
 
-const PixFrame = struct { data: []u8, delay_ms: u32 };
+pub const PixFrame = struct { data: []u8, delay_ms: u32 };
 const tintOf = @import("tint.zig").tintOf;
 
 const Result = struct {
@@ -178,7 +208,8 @@ const Upload = struct {
 const trim_after_bytes = 4 * 1024 * 1024;
 
 pub const Cache = struct {
-    renderer: *c.SDL_Renderer,
+    /// Null com a janela na bandeja (`detach`/`attach`).
+    renderer: ?*c.SDL_Renderer,
     wake_type: u32,
     map: std.StringHashMapUnmanaged(Entry) = .empty,
     jobs: Queue(Job),
@@ -214,6 +245,8 @@ pub const Cache = struct {
     copied: ?bool = null,
     /// Limite de memória das imagens (Configurações → Desempenho).
     budget_bytes: usize = 32 * 1024 * 1024,
+    /// Imagens guardadas em pixels que voltaram para a GPU (o QA confere).
+    unparked: u32 = 0,
 
     pub fn init(renderer: *c.SDL_Renderer, wake_type: u32) !Cache {
         if (curl_mutex == null) curl_mutex = c.SDL_CreateMutex() orelse return error.SdlMutex;
@@ -306,13 +339,48 @@ pub const Cache = struct {
     }
 
     pub fn getEx(cache: *Cache, url: []const u8, max_w: f32, max_h: f32, play: bool) Lookup {
+        return cache.lookup(url, max_w, max_h, play, false);
+    }
+
+    /// O clipe de um GIF favorito (um arquivo local, ui/gif_clips.zig): anima sempre e toca
+    /// decodificando aos poucos, então cada um ocupa só o anel, por mais clipes que a aba
+    /// Favoritos mostre ao mesmo tempo.
+    pub fn getClip(cache: *Cache, url: []const u8, max_w: f32, max_h: f32) Lookup {
+        return cache.lookup(url, max_w, max_h, true, true);
+    }
+
+    /// Esquece `url` em todos os tamanhos (o arquivo do clipe mudou ou saiu). O que ainda
+    /// está carregando chega e sai na próxima vez que ninguém pedir.
+    pub fn forget(cache: *Cache, url: []const u8) void {
+        while (true) {
+            var victim: ?[]const u8 = null;
+            var it = cache.map.iterator();
+            while (it.next()) |e| {
+                const k = e.key_ptr.*;
+                const sp = std.mem.indexOfScalar(u8, k, ' ') orelse continue;
+                if (e.value_ptr.state != .loading and std.mem.eql(u8, k[sp + 1 ..], url)) {
+                    victim = k;
+                    break;
+                }
+            }
+            cache.drop(victim orelse return);
+        }
+    }
+
+    fn lookup(cache: *Cache, url: []const u8, max_w: f32, max_h: f32, play: bool, stream: bool) Lookup {
         // Tamanhos arredondados: quem pede 301 ou 330 de largura usa a mesma.
         const bw = media_url.sizeBucket(max_w);
         const bh = media_url.sizeBucket(max_h);
         var kbuf: [2200]u8 = undefined;
-        const key = std.fmt.bufPrint(&kbuf, "{d}x{d} {s}", .{ bw, bh, url }) catch return .failed;
+        // (A que toca aos poucos é outra entrada: o "s" depois do tamanho.)
+        const key = std.fmt.bufPrint(&kbuf, "{d}x{d}{s} {s}", .{ bw, bh, if (stream) "s" else "", url }) catch return .failed;
         if (cache.map.getPtr(key)) |e| {
             e.used_ms = cache.now_ms;
+            if (e.state == .ready and e.frames.len == 0 and !cache.unpark(e)) {
+                // Sem como voltar para a GPU: sai, e o próximo quadro pede de novo.
+                if (cache.renderer != null) cache.drop(key);
+                return .loading;
+            }
             return switch (e.state) {
                 .loading => .loading,
                 .failed => .failed,
@@ -331,6 +399,7 @@ pub const Cache = struct {
             .url = alloc.dupe(u8, url) catch return .failed,
             .max_w = bw,
             .max_h = bh,
+            .stream = stream,
         };
         cache.startWorkers();
         cache.jobs.push(job);
@@ -415,6 +484,12 @@ pub const Cache = struct {
         for (batch.items) |r| {
             if (std.mem.startsWith(u8, r.key, clip_prefix)) {
                 cache.finishCopy(r);
+            } else if (cache.renderer == null) {
+                // Na bandeja: o que ainda chega não vira textura nem fica em pixels
+                // (é pedido de novo se aparecer quando a janela voltar).
+                cache.forgetPending(r.key);
+                cache.freed_bytes +|= r.px.bytes();
+                freeResult(r);
             } else cache.backlog.append(alloc, r) catch freeResult(r);
         }
         const worked = cache.backlog.items.len > 0 or cache.uploading != null;
@@ -424,7 +499,7 @@ pub const Cache = struct {
             cache.trim_due = true;
         }
         const t0 = c.SDL_GetTicksNS();
-        while (true) {
+        while (cache.renderer != null) {
             if (cache.uploading == null) {
                 if (cache.backlog.items.len == 0) break;
                 cache.beginUpload(cache.backlog.orderedRemove(0));
@@ -448,6 +523,9 @@ pub const Cache = struct {
 
     fn beginUpload(cache: *Cache, r: Result) void {
         const e = cache.map.getPtr(r.key) orelse return freeResult(r);
+        // Pedida de novo depois de sair do cache com um pedido andando (a janela foi para
+        // a bandeja: `detach`): o primeiro resultado que chega vale, o outro sai.
+        if (e.state != .loading) return freeResult(r);
         if (r.px.frames.len == 0) {
             e.state = .failed;
             return freeResult(r);
@@ -465,7 +543,7 @@ pub const Cache = struct {
         const px = u.r.px;
         if (u.n < px.frames.len) created: {
             const pf = px.frames[u.n];
-            const tex = c.SDL_CreateTexture(cache.renderer, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, px.w, px.h) orelse break :created;
+            const tex = c.SDL_CreateTexture(cache.renderer.?, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, px.w, px.h) orelse break :created;
             _ = c.SDL_UpdateTexture(tex, null, pf.data.ptr, @as(c_int, px.w) * 4);
             _ = c.SDL_SetTextureScaleMode(tex, c.SDL_SCALEMODE_LINEAR);
             _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_BLEND);
@@ -488,6 +566,11 @@ pub const Cache = struct {
             alloc.free(done.frames);
             return;
         };
+        if (e.state != .loading) {
+            for (done.frames[0..done.n]) |f| c.SDL_DestroyTexture(f.tex);
+            alloc.free(done.frames);
+            return;
+        }
         if (done.n == 0) {
             alloc.free(done.frames);
             e.state = .failed;
@@ -497,7 +580,7 @@ pub const Cache = struct {
         var stream: ?*gif_stream.Stream = null;
         if (seed) |sd| {
             seed = null;
-            stream = gif_stream.create(cache.renderer, sd, px.w, px.h);
+            stream = gif_stream.create(cache.renderer.?, sd, px.w, px.h);
             if (stream) |st| bytes += st.bytes;
         }
         e.* = .{ .state = .ready, .frames = alloc.realloc(done.frames, done.n) catch done.frames[0..done.n], .w = px.w, .h = px.h, .bytes = bytes, .used_ms = cache.now_ms, .stream = stream, .tint = tintOf(px.frames[0].data, px.w, px.h) };
@@ -545,13 +628,138 @@ pub const Cache = struct {
             while (it.next()) |e| {
                 const v = e.value_ptr;
                 if (v.state == .loading) continue;
-                if (v.state == .ready and janela.keepsImageHidden(v.bytes, if (v.animated()) 2 else v.frames.len, cache.drawn_ms - v.used_ms)) continue;
+                if (v.state == .ready and janela.keepsImageHidden(v.bytes, v.frameCount(), cache.drawn_ms - v.used_ms)) continue;
                 victim = e.key_ptr.*;
                 break;
             }
             cache.drop(victim orelse return freed);
             freed = true;
         }
+    }
+
+    /// Uma entrada que ainda não tem imagem sai do cache (o pedido dela foi descartado).
+    fn forgetPending(cache: *Cache, key: []const u8) void {
+        const e = cache.map.getPtr(key) orelse return;
+        if (e.state == .loading) cache.drop(key);
+    }
+
+    /// O renderizador vai embora: a janela foi para a bandeja (App.releaseGpu). Toda
+    /// textura das imagens sai (os quadros dos GIFs também). A imagem pequena que estava
+    /// na tela (`janela.keepsImageHidden`, a regra de `releaseHidden`) fica em pixels na
+    /// memória e volta para a GPU quando for desenhada de novo, sem baixar nada: a
+    /// janela volta com os avatares e os ícones. O resto sai do cache e é pedido de novo
+    /// quando aparecer. Os pedidos na fila e o que ainda não virou textura também saem:
+    /// com a janela fechada, ninguém vai ver.
+    pub fn detach(cache: *Cache) void {
+        const r = cache.renderer orelse return;
+        if (cache.uploading) |u| {
+            for (u.frames[0..u.n]) |f| c.SDL_DestroyTexture(f.tex);
+            alloc.free(u.frames);
+            cache.uploading = null;
+            cache.forgetPending(u.r.key);
+            freeResult(u.r);
+        }
+        for (cache.backlog.items) |res| {
+            cache.forgetPending(res.key);
+            freeResult(res);
+        }
+        cache.backlog.clearRetainingCapacity();
+        // Os pedidos que nenhuma thread pegou ainda (a cópia para a área de transferência fica).
+        var jobs: std.ArrayList(Job) = .empty;
+        defer jobs.deinit(alloc);
+        cache.jobs.drain(&jobs);
+        for (jobs.items) |jb| {
+            if (std.mem.startsWith(u8, jb.key, clip_prefix)) {
+                cache.jobs.push(jb);
+                continue;
+            }
+            cache.forgetPending(jb.key);
+            freeJob(jb);
+        }
+        // As que ficam em pixels saem da GPU de uma vez, por uma textura de desenho só.
+        var max_w: c_int = 0;
+        var max_h: c_int = 0;
+        var it = cache.map.iterator();
+        while (it.next()) |e| if (parks(cache, e.value_ptr)) {
+            max_w = @max(max_w, e.value_ptr.w);
+            max_h = @max(max_h, e.value_ptr.h);
+        };
+        const target = if (max_w > 0) c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_TARGET, max_w, max_h) else null;
+        defer if (target) |t| c.SDL_DestroyTexture(t);
+        var gone: std.ArrayList([]const u8) = .empty;
+        defer gone.deinit(alloc);
+        it = cache.map.iterator();
+        while (it.next()) |e| {
+            const v = e.value_ptr;
+            switch (v.state) {
+                // O pedido dele foi descartado acima, ou está numa thread e é solto ao chegar.
+                .loading => gone.append(alloc, e.key_ptr.*) catch {},
+                .failed => {},
+                .ready => {
+                    const px = if (parks(cache, v)) if (target) |t| readBack(r, t, v.frames[0].tex, v.w, v.h) else null else null;
+                    if (px) |p| {
+                        for (v.frames) |f| c.SDL_DestroyTexture(f.tex);
+                        alloc.free(v.frames);
+                        v.frames = &.{};
+                        v.parked = p;
+                    } else gone.append(alloc, e.key_ptr.*) catch {};
+                },
+            }
+        }
+        for (gone.items) |k| cache.drop(k);
+        cache.renderer = null;
+        cache.next_frame_ms = std.math.maxInt(i64);
+        cache.trim_due = true;
+    }
+
+    /// O renderizador novo (a janela voltou da bandeja). As imagens em pixels voltam
+    /// para a GPU quando forem desenhadas; as outras são pedidas de novo.
+    pub fn attach(cache: *Cache, renderer: *c.SDL_Renderer) void {
+        cache.renderer = renderer;
+    }
+
+    /// Fica em pixels na bandeja (`detach`).
+    fn parks(cache: *const Cache, v: *const Entry) bool {
+        return v.state == .ready and v.frames.len == 1 and v.stream == null and
+            janela.keepsImageHidden(v.bytes, v.frameCount(), cache.drawn_ms - v.used_ms);
+    }
+
+    /// A guardada em pixels de volta numa textura. Falso sem renderizador ou se não deu.
+    fn unpark(cache: *Cache, e: *Entry) bool {
+        const r = cache.renderer orelse return false;
+        if (e.parked.len == 0) return false;
+        const frames = alloc.alloc(Frame, 1) catch return false;
+        const tex = c.SDL_CreateTexture(r, c.SDL_PIXELFORMAT_RGBA32, c.SDL_TEXTUREACCESS_STATIC, e.w, e.h) orelse {
+            alloc.free(frames);
+            return false;
+        };
+        _ = c.SDL_UpdateTexture(tex, null, e.parked.ptr, @as(c_int, e.w) * 4);
+        _ = c.SDL_SetTextureScaleMode(tex, c.SDL_SCALEMODE_LINEAR);
+        _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_BLEND);
+        frames[0] = .{ .tex = tex, .end_ms = 1 };
+        alloc.free(e.parked);
+        e.parked = &.{};
+        e.frames = frames;
+        cache.unparked +%= 1;
+        return true;
+    }
+
+    /// Quantas estão guardadas em pixels, sem textura (o QA confere).
+    pub fn parkedCount(cache: *const Cache) usize {
+        var n: usize = 0;
+        var it = cache.map.valueIterator();
+        while (it.next()) |e| {
+            if (e.parked.len > 0) n += 1;
+        }
+        return n;
+    }
+
+    /// Quantas texturas as imagens têm agora (os quadros dos GIFs contam; o QA confere).
+    pub fn textureCount(cache: *const Cache) usize {
+        var n: usize = 0;
+        var it = cache.map.valueIterator();
+        while (it.next()) |e| n += e.frames.len + @intFromBool(e.stream != null);
+        return n;
     }
 
     /// Quantas imagens estão prontas (a página de Desempenho mostra).
@@ -567,6 +775,40 @@ pub const Cache = struct {
     fn freeJob(jb: Job) void {
         alloc.free(jb.key);
         alloc.free(jb.url);
+    }
+
+    /// Os pixels de `tex` (w×h, RGBA) lidos de volta da GPU: desenhada sem mistura num
+    /// canto de `target` (uma textura de desenho pelo menos desse tamanho), e lida dali.
+    /// Null se não deu.
+    fn readBack(r: *c.SDL_Renderer, target: *c.SDL_Texture, tex: *c.SDL_Texture, w: u16, h: u16) ?[]u8 {
+        if (w == 0 or h == 0) return null;
+        const prev = c.SDL_GetRenderTarget(r);
+        defer _ = c.SDL_SetRenderTarget(r, prev);
+        if (!c.SDL_SetRenderTarget(r, target)) return null;
+        _ = c.SDL_SetRenderDrawColor(r, 0, 0, 0, 0);
+        _ = c.SDL_RenderClear(r);
+        // Cópia exata: sem mistura com o fundo e sem filtro (o tamanho é o mesmo).
+        _ = c.SDL_SetTextureBlendMode(tex, c.SDL_BLENDMODE_NONE);
+        _ = c.SDL_SetTextureScaleMode(tex, c.SDL_SCALEMODE_NEAREST);
+        const fw: f32 = @floatFromInt(w);
+        const fh: f32 = @floatFromInt(h);
+        const dst: c.SDL_FRect = .{ .x = 0, .y = 0, .w = fw, .h = fh };
+        if (!c.SDL_RenderTexture(r, tex, null, &dst)) return null;
+        const area: c.SDL_Rect = .{ .x = 0, .y = 0, .w = w, .h = h };
+        const read = c.SDL_RenderReadPixels(r, &area) orelse return null;
+        defer c.SDL_DestroySurface(read);
+        const rgba = if (read.*.format == c.SDL_PIXELFORMAT_RGBA32) read else c.SDL_ConvertSurface(read, c.SDL_PIXELFORMAT_RGBA32) orelse return null;
+        defer if (rgba != read) c.SDL_DestroySurface(rgba);
+        if (rgba.*.w != w or rgba.*.h != h) return null;
+        const row = @as(usize, w) * 4;
+        const out = alloc.alloc(u8, row * h) catch return null;
+        const src: [*]const u8 = @ptrCast(rgba.*.pixels orelse {
+            alloc.free(out);
+            return null;
+        });
+        const pitch: usize = @intCast(rgba.*.pitch);
+        for (0..h) |y| @memcpy(out[y * row ..][0..row], src[y * pitch ..][0..row]);
+        return out;
     }
 
     /// Navegador: o trabalho das threads de mídia na thread da página, uns poucos
@@ -654,6 +896,44 @@ pub fn recentClear() void {
         if (e.data.len > 0) alloc.free(e.data);
         e.* = .{};
     }
+    for (&anim_recent) |*e| {
+        if (e.data.len > 0) alloc.free(e.data);
+        e.* = .{};
+    }
+}
+
+/// As duas últimas animações baixadas que não cabem em `recent` (até 4 MB cada): a estrela
+/// num GIF que acabou de tocar faz o clipe dele (ui/gif_clips.zig) com o arquivo que já
+/// está aqui, sem baixar de novo. Soltas junto com as imagens.
+var anim_recent: [2]Recent = @splat(.{});
+var anim_next: usize = 0;
+const anim_keep_max = 4 * 1024 * 1024;
+
+fn animPut(url: []const u8, data: []const u8) void {
+    if (data.len <= 96 * 1024 or data.len > anim_keep_max) return;
+    const copy = alloc.dupe(u8, data) catch return;
+    c.SDL_LockMutex(recent_mutex);
+    defer c.SDL_UnlockMutex(recent_mutex);
+    const slot = &anim_recent[anim_next];
+    if (slot.data.len > 0) alloc.free(slot.data);
+    slot.* = .{ .url_hash = std.hash.Wyhash.hash(0, url), .data = copy };
+    anim_next = (anim_next + 1) % anim_recent.len;
+}
+
+/// O arquivo de `url` se as imagens acabaram de baixar (para o clipe da estrela). `out` no
+/// c_allocator. Qualquer thread.
+pub fn cachedSource(url: []const u8, out: *std.ArrayList(u8)) bool {
+    if (recentGet(url, out)) return true;
+    const h = std.hash.Wyhash.hash(0, url);
+    c.SDL_LockMutex(recent_mutex);
+    defer c.SDL_UnlockMutex(recent_mutex);
+    for (anim_recent) |e| {
+        if (e.url_hash == h and e.data.len > 0) {
+            out.appendSlice(alloc, e.data) catch return false;
+            return true;
+        }
+    }
+    return false;
 }
 
 /// O arquivo de `url`, se as imagens já baixaram e ele é o original (para salvar e
@@ -713,32 +993,7 @@ fn load(curl: *?*c.CURL, jb: Job, stop: *std.atomic.Value(bool)) Pixels {
         }
         bytes.appendSlice(alloc, @as([*]const u8, @ptrCast(data))[0..size]) catch return .{};
     } else if (std.mem.startsWith(u8, jb.url, media_url.tenor_page)) {
-        // GIF antigo do Tenor: a página diz o endereço novo do vídeo, e dele
-        // sai o WebP animado (só com Configurações → Privacidade → GIFs ligado).
-        var page: std.ArrayList(u8) = .empty;
-        defer page.deinit(alloc);
-        var pj = jb;
-        pj.url = @constCast(jb.url[media_url.tenor_page.len..]);
-        if (!download(curl, pj, &page, stop)) return .{};
-        var ub: [512]u8 = undefined;
-        const video = media_url.tenorVideoFromPage(page.items) orelse {
-            logFail(pj.url, "página do Tenor sem og:video", .{});
-            return .{};
-        };
-        var got = false;
-        if (media_url.gifFromVideo(&ub, video)) |webp| {
-            pj.url = @constCast(webp);
-            got = download(curl, pj, &bytes, stop);
-        }
-        // Sem o WebP (os GIFs mais antigos só existem em MP4): o próprio MP4,
-        // decodificado pelo FFmpeg do sistema, se tiver.
-        if (!got) {
-            if (ffmpeg.get() == null) return .{};
-            bytes.clearRetainingCapacity();
-            pj.url = @constCast(video);
-            if (!download(curl, pj, &bytes, stop)) return .{};
-            allow_video = true;
-        }
+        if (!tenorPage(curl, jb, &bytes, stop, &allow_video)) return .{};
     } else if (!recentGet(jb.url, &bytes)) {
         from_net = true;
         var got = downloadAs(curl, jb, &bytes, stop, false, &info);
@@ -767,14 +1022,94 @@ fn load(curl: *?*c.CURL, jb: Job, stop: *std.atomic.Value(bool)) Pixels {
     }
     // Só o que abriu fica guardado para o próximo tamanho.
     if (from_net and px.frames.len > 0) recentPut(jb.url, bytes.items);
+    // A animação também, por pouco tempo: a estrela faz o clipe dela sem baixar de novo.
+    if (from_net and (px.frames.len > 1 or px.seed != null)) animPut(jb.url, bytes.items);
     return px;
+}
+
+/// GIF antigo do Tenor: a página diz o endereço novo do vídeo, e dele sai o WebP animado
+/// (só com Configurações → Privacidade → GIFs ligado). Sem o WebP (os GIFs mais antigos só
+/// existem em MP4): o próprio MP4, decodificado pelo FFmpeg do sistema, se tiver
+/// (`allow_video` vira true).
+fn tenorPage(curl: *?*c.CURL, jb: Job, bytes: *std.ArrayList(u8), stop: *std.atomic.Value(bool), allow_video: *bool) bool {
+    var page: std.ArrayList(u8) = .empty;
+    defer page.deinit(alloc);
+    var pj = jb;
+    pj.url = @constCast(jb.url[media_url.tenor_page.len..]);
+    if (!download(curl, pj, &page, stop)) return false;
+    var ub: [512]u8 = undefined;
+    const video = media_url.tenorVideoFromPage(page.items) orelse {
+        logFail(pj.url, "página do Tenor sem og:video", .{});
+        return false;
+    };
+    if (media_url.gifFromVideo(&ub, video)) |webp| {
+        pj.url = @constCast(webp);
+        if (download(curl, pj, bytes, stop)) return true;
+    }
+    if (ffmpeg.get() == null) return false;
+    bytes.clearRetainingCapacity();
+    pj.url = @constCast(video);
+    if (!download(curl, pj, bytes, stop)) return false;
+    allow_video.* = true;
+    return true;
+}
+
+/// Baixa o arquivo de `url` para fazer um clipe (ui/gif_clips.zig) pelo caminho das
+/// imagens: só de domínios permitidos, com o proxy das configurações, pedindo ao proxy de
+/// mídia do Discord o lado `side` (e a original, se ele recusar), e a página do GIF antigo
+/// do Tenor virando o WebP ou o MP4 (`allow_video` = true: só abre com FFmpeg). `out` no
+/// c_allocator. Qualquer thread menos a da interface.
+pub fn downloadSource(curl: *?*c.CURL, url: []const u8, side: u16, out: *std.ArrayList(u8), stop: *std.atomic.Value(bool), allow_video: *bool) bool {
+    const jb: Job = .{ .key = @constCast(""), .url = @constCast(url), .max_w = side, .max_h = side };
+    if (std.mem.startsWith(u8, url, media_url.tenor_page)) return tenorPage(curl, jb, out, stop, allow_video);
+    var info: FetchInfo = .{};
+    var got = downloadAs(curl, jb, out, stop, false, &info);
+    if (got != .ok and media_url.retryOriginal(url, side, side, got)) {
+        out.clearRetainingCapacity();
+        info = .{};
+        got = downloadAs(curl, jb, out, stop, true, &info);
+    }
+    return got == .ok;
+}
+
+/// Como decodificar: vídeo só no GIF que só existe em MP4; `stream` toca sempre aos
+/// poucos (o primeiro quadro fica como o parado); `tap` recebe os quadros um a um.
+const Opts = struct {
+    allow_video: bool = false,
+    stream: bool = false,
+    tap: ?*const Tap = null,
+};
+
+/// Quem recebe os quadros de uma animação um a um, no tamanho original (RGBA sw×sh, a
+/// memória é do decodificador), com quanto cada um dura. false = parar. Nada fica guardado
+/// na memória das imagens.
+pub const Tap = struct {
+    ctx: *anyopaque,
+    frame: *const fn (ctx: *anyopaque, rgba: []const u8, sw: usize, sh: usize, ms: u32) bool,
+};
+
+/// Decodifica `data` (GIF, WebP, APNG, ou o MP4 do Tenor com `allow_video` e FFmpeg)
+/// passando cada quadro para `tap`, numa das vagas de decodificação. Imagem parada não
+/// passa pelo `tap`: volta em Pixels, já reduzida a side×side. Qualquer thread menos a da
+/// interface.
+pub fn decodeFrames(data: []const u8, side: u16, stop: *std.atomic.Value(bool), allow_video: bool, tap: *const Tap) Pixels {
+    if (decode_slots) |sem| c.SDL_WaitSemaphore(sem);
+    defer if (decode_slots) |sem| c.SDL_SignalSemaphore(sem);
+    return decode(data, side, side, stop, .{ .allow_video = allow_video, .tap = tap });
+}
+
+/// Os quadros de uma imagem da demonstração ("demo:gif") com lado `side` (só calcula:
+/// qualquer thread).
+pub fn demoFrames(url: []const u8, side: u16, stop: *std.atomic.Value(bool)) Pixels {
+    if (!std.mem.startsWith(u8, url, "demo:")) return .{};
+    return demo(.{ .key = @constCast(""), .url = @constCast(url), .max_w = side, .max_h = side }, stop);
 }
 
 /// Decodifica numa das vagas (no máximo 2 ao mesmo tempo).
 fn decodeSlot(data: []const u8, jb: Job, stop: *std.atomic.Value(bool), allow_video: bool) Pixels {
     if (decode_slots) |sem| c.SDL_WaitSemaphore(sem);
     defer if (decode_slots) |sem| c.SDL_SignalSemaphore(sem);
-    return decode(data, jb.max_w, jb.max_h, stop, allow_video);
+    return decode(data, jb.max_w, jb.max_h, stop, .{ .allow_video = allow_video, .stream = jb.stream });
 }
 
 /// Os primeiros bytes e o tipo que o servidor disse: "ftypavif" é AVIF, "<!DO" é uma página.
@@ -848,7 +1183,8 @@ pub fn curlGlobalInit() void {
     c.SDL_LockMutex(curl_mutex);
     defer c.SDL_UnlockMutex(curl_mutex);
     if (curl_inited) return;
-    _ = c.curl_global_init(c.CURL_GLOBAL_DEFAULT);
+    // O curl aloca pelas funções que contam (platform/mem_contas.zig); no navegador não há curl.
+    if (@import("builtin").os.tag == .emscripten) _ = c.curl_global_init(c.CURL_GLOBAL_DEFAULT) else @import("../platform/mem_contas.zig").curlInit();
     curl_inited = true;
 }
 
@@ -928,7 +1264,10 @@ pub fn fetchEx(curl: *?*c.CURL, url: [:0]const u8, sink: Sink, stop: *std.atomic
         var t: Transfer = .{ .sink = sink, .h = h };
         c.curl_easy_reset(h);
         @import("../platform/sys.zig").curlTls(h);
-        _ = c.curl_easy_setopt(h, c.CURLOPT_URL, cur_url.ptr);
+        // No QA da conta grande o CDN é o Discord de mentira local (net/enderecos.zig).
+        var local_buf: [2200]u8 = undefined;
+        const go_url = enderecos.midiaLocal(&local_buf, cur_url) orelse cur_url;
+        _ = c.curl_easy_setopt(h, c.CURLOPT_URL, go_url.ptr);
         _ = c.curl_easy_setopt(h, c.CURLOPT_NOSIGNAL, @as(c_long, 1));
         // No CDN do Discord, o mesmo UA do cliente web: um "larperCord/0.1"
         // aqui é um fingerprint de graça. Fora do Discord, o app se identifica.
@@ -944,7 +1283,7 @@ pub fn fetchEx(curl: *?*c.CURL, url: [:0]const u8, sink: Sink, stop: *std.atomic
             _ = c.curl_easy_setopt(h, c.CURLOPT_LOW_SPEED_TIME, @as(c_long, 20));
         }
         _ = c.curl_easy_setopt(h, c.CURLOPT_FOLLOWLOCATION, @as(c_long, 0));
-        _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, "https");
+        _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, enderecos.protocolosMidia());
         _ = c.curl_easy_setopt(h, c.CURLOPT_ACCEPT_ENCODING, @import("../platform/sys.zig").acceptEncoding());
         // Proxy das configurações (mídia de fora, ou tudo).
         var pbuf: proxy.Buf = undefined;
@@ -953,7 +1292,27 @@ pub fn fetchEx(curl: *?*c.CURL, url: [:0]const u8, sink: Sink, stop: *std.atomic
         _ = c.curl_easy_setopt(h, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
         _ = c.curl_easy_setopt(h, c.CURLOPT_XFERINFOFUNCTION, abortCb);
         _ = c.curl_easy_setopt(h, c.CURLOPT_XFERINFODATA, stop);
+        // A aba Rede do Inspetor (só gravando): o pedido, os cabeçalhos da resposta e o tamanho.
+        var insp_h: std.ArrayList(u8) = .empty;
+        defer insp_h.deinit(std.heap.c_allocator);
+        const insp_id = if (insp.gravando()) blk: {
+            var ua_line: [256]u8 = undefined;
+            _ = c.curl_easy_setopt(h, c.CURLOPT_HEADERFUNCTION, inspHeaderCb);
+            _ = c.curl_easy_setopt(h, c.CURLOPT_HEADERDATA, &insp_h);
+            break :blk insp.net.begin(.media, "GET", cur_url, std.fmt.bufPrint(&ua_line, "User-Agent: {s}\n", .{std.mem.span(ua)}) catch "", null, "imagens");
+        } else 0;
         const rc = c.curl_easy_perform(h);
+        if (insp_id != 0) {
+            var e: insp.NetLog.End = .{ .resp_headers = insp_h.items, .attempt = hops };
+            @import("../inspect/curl_insp.zig").endInfo(h, &e);
+            var got: c.curl_off_t = 0;
+            if (c.curl_easy_getinfo(h, c.CURLINFO_SIZE_DOWNLOAD_T, &got) == c.CURLE_OK) e.resp_len = @intCast(@max(got, 0));
+            if (rc != c.CURLE_OK) {
+                e.failed = true;
+                e.note = if (t.stopped or stop.load(.acquire)) "cancelado" else std.mem.span(c.curl_easy_strerror(rc));
+            }
+            insp.net.end(insp_id, e);
+        }
         if (rc != c.CURLE_OK) {
             if (!t.stopped and !stop.load(.acquire)) logFail(url, "erro do curl: {s}", .{std.mem.span(c.curl_easy_strerror(rc))});
             return false;
@@ -990,6 +1349,12 @@ pub fn fetchEx(curl: *?*c.CURL, url: [:0]const u8, sink: Sink, stop: *std.atomic
     }
 }
 
+fn inspHeaderCb(ptr: [*c]u8, size: usize, n: usize, user: ?*anyopaque) callconv(.c) usize {
+    const out: *std.ArrayList(u8) = @ptrCast(@alignCast(user.?));
+    @import("../inspect/curl_insp.zig").responseHeader(out, ptr[0 .. size * n]);
+    return size * n;
+}
+
 /// Tamanho final de uma imagem sw×sh cabendo em max_w×max_h (nunca aumenta).
 fn fit(sw: usize, sh: usize, max_w: u16, max_h: u16) [2]usize {
     const scale = @min(1.0, @min(@as(f32, @floatFromInt(max_w)) / @as(f32, @floatFromInt(sw)), @as(f32, @floatFromInt(max_h)) / @as(f32, @floatFromInt(sh))));
@@ -1002,21 +1367,22 @@ fn fit(sw: usize, sh: usize, max_w: u16, max_h: u16) [2]usize {
 /// Decodifica e reduz para caber em max_w×max_h. Os pixels voltam no
 /// c_allocator (RGBA, 4 bytes por pixel). GIF, WebP e PNG animados viram
 /// vários quadros. O formato vem dos primeiros bytes, não da URL.
-fn decode(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), allow_video: bool) Pixels {
+fn decode(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) Pixels {
     if (data.len > std.math.maxInt(c_int)) return .{};
-    if (isWebp(data)) return decodeWebp(data, max_w, max_h, stop);
+    if (isWebp(data)) return decodeWebp(data, max_w, max_h, stop, o);
     // GIF que só existe em MP4 (Tenor antigo): pelo FFmpeg, se tiver.
-    if (ffmpeg.looksLikeVideo(data)) return if (allow_video) decodeVideo(data, max_w, max_h, stop) else .{};
+    if (ffmpeg.looksLikeVideo(data)) return if (o.allow_video) decodeVideo(data, max_w, max_h, stop, o) else .{};
     if (data.len > 6 and std.mem.startsWith(u8, data, "GIF8")) {
         // a tiny gif can allocate alot of memory
         // check the size first and skip if too big
         if (!media_url.gifSizeAllowed(data)) return .{};
-        const anim_px = decodeGif(data, max_w, max_h, stop);
-        if (anim_px.frames.len > 0) return anim_px;
+        const anim_px = decodeGif(data, max_w, max_h, stop, o);
+        // (Com `tap`, os quadros já foram: o primeiro não volta como imagem parada.)
+        if (anim_px.frames.len > 0 or o.tap != null) return anim_px;
     }
     if (apng.isAnimated(data)) {
-        const anim_px = decodeApng(data, max_w, max_h, stop);
-        if (anim_px.frames.len > 0) return anim_px;
+        const anim_px = decodeApng(data, max_w, max_h, stop, o);
+        if (anim_px.frames.len > 0 or o.tap != null) return anim_px;
     }
     var w: c_int = 0;
     var h: c_int = 0;
@@ -1072,6 +1438,10 @@ const FrameSink = struct {
     streaming: bool = false,
     src_w: usize = 0,
     src_h: usize = 0,
+    /// Toca aos poucos de qualquer jeito (GIF e WebP): fica só o primeiro quadro.
+    force_stream: bool = false,
+    /// Os quadros vão para cá, um a um, e nada fica aqui.
+    tap: ?*const Tap = null,
 
     fn bytes(g: *const FrameSink) usize {
         return g.frames.items.len * g.w * g.h * 4;
@@ -1100,6 +1470,7 @@ const FrameSink = struct {
         // comum aos quatro formatos para desistir (e para o app poder fechar).
         if (g.seen >= max_gif_seen or g.stop.load(.acquire) or c.SDL_GetTicks() >= g.deadline_ms) return false;
         defer g.seen += 1;
+        if (g.tap) |t| return t.frame(t.ctx, rgba[0 .. sw * sh * 4], sw, sh, ms);
         if (g.seen % g.step != 0) {
             if (g.frames.items.len > 0) g.frames.items[g.frames.items.len - 1].delay_ms +|= ms;
             return true;
@@ -1114,6 +1485,12 @@ const FrameSink = struct {
             alloc.free(out);
             return false;
         };
+        if (g.force_stream and g.stream_kind != null) {
+            g.streaming = true;
+            g.src_w = sw;
+            g.src_h = sh;
+            return false;
+        }
         const limit = gif_limit_bytes.load(.monotonic);
         if (g.bytes() > limit or g.frames.items.len > max_gif_frames) {
             const sb: ?usize = if (g.stream_kind) |k| quadros.streamBytes(g.compressed_len, k, sw, sh, g.w, g.h) else null;
@@ -1165,12 +1542,12 @@ const FrameSink = struct {
     }
 };
 
-fn newSink(max_w: u16, max_h: u16, stop: *std.atomic.Value(bool)) FrameSink {
-    return .{ .max_w = max_w, .max_h = max_h, .stop = stop, .deadline_ms = c.SDL_GetTicks() + max_decode_ms };
+fn newSink(max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) FrameSink {
+    return .{ .max_w = max_w, .max_h = max_h, .stop = stop, .deadline_ms = c.SDL_GetTicks() + max_decode_ms, .force_stream = o.stream, .tap = o.tap };
 }
 
-fn decodeGif(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool)) Pixels {
-    var sink = newSink(max_w, max_h, stop);
+fn decodeGif(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) Pixels {
+    var sink = newSink(max_w, max_h, stop, o);
     sink.stream_kind = .gif;
     sink.compressed_len = data.len;
     _ = c.larper_gif_frames(data.ptr, @intCast(data.len), FrameSink.gifCb, &sink);
@@ -1184,7 +1561,7 @@ fn isWebp(data: []const u8) bool {
 
 /// WebP parado vai direto; o animado passa pelo WebPAnimDecoder, que já
 /// compõe cada quadro na tela cheia (os tempos dele são acumulados).
-fn decodeWebp(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool)) Pixels {
+fn decodeWebp(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) Pixels {
     var feat: c.WebPBitstreamFeatures = undefined;
     if (c.WebPGetFeatures(data.ptr, data.len, &feat) != c.VP8_STATUS_OK) return .{};
     // O tamanho vem no cabeçalho: recusa antes de alocar (mesmo limite do stb).
@@ -1208,7 +1585,7 @@ fn decodeWebp(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(
     if (info.canvas_width == 0 or info.canvas_height == 0 or info.canvas_width > 4096 or info.canvas_height > 4096) return .{};
     const cw: usize = info.canvas_width;
     const ch: usize = info.canvas_height;
-    var sink = newSink(max_w, max_h, stop);
+    var sink = newSink(max_w, max_h, stop, o);
     sink.stream_kind = .webp;
     sink.compressed_len = data.len;
     var last: c_int = 0;
@@ -1226,12 +1603,12 @@ fn decodeWebp(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(
 /// Um vídeo curto virando animação (como um GIF): até 30 qps, 60 s e o
 /// mesmo limite de memória das outras animações. O tempo de cada quadro é
 /// a distância até o próximo.
-fn decodeVideo(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool)) Pixels {
+fn decodeVideo(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) Pixels {
     const a = ffmpeg.get() orelse return .{};
     var rd: ffmpeg.MemReader = .{ .data = data };
     var m = ffmpeg.Media.open(a, rd.io(), false, 1) catch return .{};
     defer m.close();
-    var sink = newSink(max_w, max_h, stop);
+    var sink = newSink(max_w, max_h, stop, o);
     var prev: []u8 = &.{};
     defer if (prev.len > 0) alloc.free(prev);
     var dims: [2]usize = .{ 0, 0 };
@@ -1307,8 +1684,8 @@ const ApngCtx = struct {
     }
 };
 
-fn decodeApng(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool)) Pixels {
-    var sink = newSink(max_w, max_h, stop);
+fn decodeApng(data: []const u8, max_w: u16, max_h: u16, stop: *std.atomic.Value(bool), o: Opts) Pixels {
+    var sink = newSink(max_w, max_h, stop, o);
     var ctx: ApngCtx = .{ .sink = &sink };
     _ = apng.play(alloc, data, 4096, &ctx) catch {};
     return sink.finish();
@@ -1365,7 +1742,7 @@ fn demo(jb: Job, stop: *std.atomic.Value(bool)) Pixels {
         defer alloc.free(data);
         c.SDL_WaitSemaphore(decode_slots);
         defer c.SDL_SignalSemaphore(decode_slots);
-        return decode(data, jb.max_w, jb.max_h, stop, false);
+        return decode(data, jb.max_w, jb.max_h, stop, .{ .stream = jb.stream });
     }
     // "emoji:<id>:<0|1>" e "sticker:<id>:<0|1>": a carinha da demonstração.
     if (std.mem.startsWith(u8, spec, "emoji:") or std.mem.startsWith(u8, spec, "sticker:")) return demoEmoji(spec);
@@ -1373,7 +1750,7 @@ fn demo(jb: Job, stop: *std.atomic.Value(bool)) Pixels {
     if (std.mem.eql(u8, spec, "mp4")) {
         c.SDL_WaitSemaphore(decode_slots);
         defer c.SDL_SignalSemaphore(decode_slots);
-        return decodeVideo(@import("video.zig").demo_mp4, jb.max_w, jb.max_h, stop);
+        return decodeVideo(@import("video.zig").demo_mp4, jb.max_w, jb.max_h, stop, .{});
     }
     const which = std.fmt.parseInt(u8, spec, 10) catch 1;
     const full: [2]f32 = switch (which) {

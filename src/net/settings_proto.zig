@@ -10,8 +10,17 @@
 //! (os "wrappers" do google.protobuf são mensagens com o valor no campo 1).
 //! Algumas contas ainda recebem a forma antiga em JSON,
 //! `user_settings.guild_folders`; `fromJson` lê essa.
+//!
+//! Escrever (pastas mudadas aqui, core/pastas.zig): `edit` aplica as operações nas
+//! configurações inteiras e troca só o campo 14; todo o resto sai byte a byte como
+//! entrou. Dentro do 14, a pasta que não mudou também sai como veio, e a que mudou
+//! leva junto os campos que o app não conhece. Qualquer parte que não dê para ler
+//! inteira dá erro antes de montar a saída: melhor não gravar do que estragar.
+//! O PATCH leva só o campo 14 (`patchBody`): o Discord troca o campo de cima inteiro
+//! que vier e deixa os outros como estão.
 const std = @import("std");
 const jsonx = @import("jsonx.zig");
+const pastas = @import("../core/pastas.zig");
 
 pub const Error = error{
     /// A mensagem acaba no meio de um campo.
@@ -270,6 +279,372 @@ const Reader = struct {
     }
 };
 
+// --- Escrita ----------------------------------------------------------------
+
+const guild_folders_field = 14;
+
+/// Um campo inteiro: onde começa (na chave), onde acaba e o conteúdo (tipo 2).
+const Span = struct { field: u64, wire: u3, start: usize, end: usize, data: []const u8 };
+
+fn nextSpan(r: *Reader) Error!Span {
+    const start = r.pos;
+    const k = try r.key();
+    var data: []const u8 = "";
+    switch (k.wire) {
+        2 => data = try r.bytes(),
+        else => try r.skip(k.wire),
+    }
+    return .{ .field = k.field, .wire = k.wire, .start = start, .end = r.pos, .data = data };
+}
+
+/// Uma pasta como veio, lida inteira e conferida.
+const OldFolder = struct {
+    /// O `GuildFolder` inteiro (sem chave nem tamanho).
+    raw: []const u8,
+    id: u64 = 0,
+    name: []const u8 = "",
+    color: u32 = 0,
+    guilds: []u64 = &.{},
+    /// Os campos que o app não conhece, inteiros e na ordem em que vieram.
+    unknown: []const u8 = "",
+};
+
+/// O `GuildFolders` lido para editar: tipo de fio errado num campo conhecido é erro.
+const Parsed = struct {
+    folders: []OldFolder,
+    had_positions: bool,
+    /// Campos de `GuildFolders` que o app não conhece.
+    unknown: []const u8,
+};
+
+fn wantWire(sp: Span, wire: u3) Error!void {
+    if (sp.wire != wire) return error.Malformed;
+}
+
+/// Int64Value/UInt64Value: só o campo 1 como varint conta; o resto, conferido e pulado.
+fn strictInt(msg: []const u8) Error!u64 {
+    var out: u64 = 0;
+    var r: Reader = .{ .buf = msg };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        if (sp.field != 1) continue;
+        try wantWire(sp, 0);
+        var vr: Reader = .{ .buf = msg[sp.start..sp.end] };
+        _ = try vr.key();
+        out = try vr.varint();
+    }
+    return out;
+}
+
+fn strictString(msg: []const u8) Error![]const u8 {
+    var out: []const u8 = "";
+    var r: Reader = .{ .buf = msg };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        if (sp.field != 1) continue;
+        try wantWire(sp, 2);
+        out = sp.data;
+    }
+    return out;
+}
+
+/// Tudo com o alocador de arena de quem chama (`edit`).
+fn parseStrict(ar: std.mem.Allocator, content: []const u8) Error!Parsed {
+    var folders: std.ArrayList(OldFolder) = .empty;
+    var unknown: std.ArrayList(u8) = .empty;
+    var had_positions = false;
+    var r: Reader = .{ .buf = content };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        switch (sp.field) {
+            1 => {
+                try wantWire(sp, 2);
+                try folders.append(ar, try parseFolder(ar, sp.data));
+            },
+            2 => {
+                var list: std.ArrayList(u64) = .empty;
+                var vr: Reader = .{ .buf = content[sp.start..sp.end] };
+                const k = try vr.key();
+                if (!try vr.repeatedFixed64(ar, k.wire, &list)) return error.Malformed;
+                if (list.items.len > 0) had_positions = true;
+            },
+            else => try unknown.appendSlice(ar, content[sp.start..sp.end]),
+        }
+    }
+    return .{ .folders = try folders.toOwnedSlice(ar), .had_positions = had_positions, .unknown = try unknown.toOwnedSlice(ar) };
+}
+
+fn parseFolder(ar: std.mem.Allocator, msg: []const u8) Error!OldFolder {
+    var f: OldFolder = .{ .raw = msg };
+    var guilds: std.ArrayList(u64) = .empty;
+    var unknown: std.ArrayList(u8) = .empty;
+    var r: Reader = .{ .buf = msg };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        switch (sp.field) {
+            1 => {
+                var vr: Reader = .{ .buf = msg[sp.start..sp.end] };
+                const k = try vr.key();
+                if (!try vr.repeatedFixed64(ar, k.wire, &guilds)) return error.Malformed;
+            },
+            2, 4 => {
+                try wantWire(sp, 2);
+                const v = try strictInt(sp.data);
+                if (sp.field == 2) f.id = v else f.color = @truncate(v);
+            },
+            3 => {
+                try wantWire(sp, 2);
+                f.name = try strictString(sp.data);
+            },
+            else => try unknown.appendSlice(ar, msg[sp.start..sp.end]),
+        }
+    }
+    f.guilds = try guilds.toOwnedSlice(ar);
+    f.unknown = try unknown.toOwnedSlice(ar);
+    return f;
+}
+
+const Writer = struct {
+    out: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+
+    fn varint(w: Writer, v: u64) Error!void {
+        var x = v;
+        while (x >= 0x80) : (x >>= 7) try w.out.append(w.gpa, @as(u8, @truncate(x)) | 0x80);
+        try w.out.append(w.gpa, @truncate(x));
+    }
+    fn key(w: Writer, field: u64, wire: u3) Error!void {
+        try w.varint(field << 3 | wire);
+    }
+    fn bytes(w: Writer, field: u64, data: []const u8) Error!void {
+        try w.key(field, 2);
+        try w.varint(data.len);
+        try w.out.appendSlice(w.gpa, data);
+    }
+    fn packed64(w: Writer, field: u64, vals: []const u64) Error!void {
+        if (vals.len == 0) return;
+        try w.key(field, 2);
+        try w.varint(vals.len * 8);
+        for (vals) |v| {
+            var b: [8]u8 = undefined;
+            std.mem.writeInt(u64, &b, v, .little);
+            try w.out.appendSlice(w.gpa, &b);
+        }
+    }
+    /// Int64Value/UInt64Value { 1: v }.
+    fn wrapInt(w: Writer, field: u64, v: u64) Error!void {
+        var buf: [11]u8 = undefined;
+        buf[0] = 0x08;
+        var x = v;
+        var n: usize = 1;
+        while (x >= 0x80) : (x >>= 7) {
+            buf[n] = @as(u8, @truncate(x)) | 0x80;
+            n += 1;
+        }
+        buf[n] = @truncate(x);
+        try w.bytes(field, buf[0 .. n + 1]);
+    }
+    /// StringValue { 1: s }.
+    fn wrapString(w: Writer, field: u64, s: []const u8) Error!void {
+        var inner: std.ArrayList(u8) = .empty;
+        defer inner.deinit(w.gpa);
+        try (Writer{ .out = &inner, .gpa = w.gpa }).bytes(1, s);
+        try w.bytes(field, inner.items);
+    }
+};
+
+/// Um `GuildFolder` (proto3: servidores empacotados; sem id, sem nome e sem cor, os
+/// wrappers não vão). `unknown`: campos de antes que o app não conhece.
+fn writeFolder(w: Writer, f: anytype, unknown: []const u8) Error!void {
+    try w.packed64(1, f.guilds);
+    if (f.id != 0) try w.wrapInt(2, f.id);
+    if (f.name.len > 0) try w.wrapString(3, f.name);
+    if (f.color != 0) try w.wrapInt(4, f.color);
+    try w.out.appendSlice(w.gpa, unknown);
+}
+
+/// `GuildFolders` só com as pastas de `folders` (sem nada de antes): para a
+/// demonstração e os testes.
+pub fn encodeGuildFolders(gpa: std.mem.Allocator, folders: anytype) Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const w: Writer = .{ .out = &out, .gpa = gpa };
+    var one: std.ArrayList(u8) = .empty;
+    defer one.deinit(gpa);
+    for (folders) |f| {
+        one.clearRetainingCapacity();
+        try writeFolder(.{ .out = &one, .gpa = gpa }, f, "");
+        try w.bytes(1, one.items);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// Um `GuildFolder` sozinho (sem chave nem tamanho), com `unknown` no fim.
+pub fn encodeFolder(gpa: std.mem.Allocator, f: anytype, unknown: []const u8) Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try writeFolder(.{ .out = &out, .gpa = gpa }, f, unknown);
+    return out.toOwnedSlice(gpa);
+}
+
+fn sameIds(a: []const u64, b: []const u64) bool {
+    return std.mem.eql(u64, a, b);
+}
+
+/// A pasta de antes que corresponde a `f`: a do mesmo id, ou o solto do mesmo servidor.
+fn oldFor(old: []const OldFolder, f: anytype) ?*const OldFolder {
+    for (old) |*o| {
+        if (f.id != 0 and o.id == f.id) return o;
+        if (f.id == 0 and o.id == 0 and sameIds(o.guilds, f.guilds)) return o;
+    }
+    return null;
+}
+
+/// O `GuildFolders` novo: a pasta igual à de antes sai como veio; a que mudou, de
+/// novo (com os campos desconhecidos dela). A ordem antiga (`guild_positions`) só vai
+/// se já vinha, refeita com a ordem nova. Os campos desconhecidos do `GuildFolders`
+/// vão no fim.
+fn encodeEdited(ar: std.mem.Allocator, p: Parsed, folders: []const @import("../core/types.zig").GuildFolder) Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const w: Writer = .{ .out = &out, .gpa = ar };
+    var one: std.ArrayList(u8) = .empty;
+    for (folders) |f| {
+        const o = oldFor(p.folders, f);
+        if (o) |x| if (std.mem.eql(u8, x.name, f.name) and x.color == f.color and sameIds(x.guilds, f.guilds)) {
+            try w.bytes(1, x.raw);
+            continue;
+        };
+        one.clearRetainingCapacity();
+        try writeFolder(.{ .out = &one, .gpa = ar }, f, if (o) |x| x.unknown else "");
+        try w.bytes(1, one.items);
+    }
+    if (p.had_positions) {
+        var order: std.ArrayList(u64) = .empty;
+        for (folders) |f| try order.appendSlice(ar, f.guilds);
+        try w.packed64(2, order.items);
+    }
+    try out.appendSlice(ar, p.unknown);
+    return out.toOwnedSlice(ar);
+}
+
+/// As configurações lidas e conferidas: o conteúdo de todo campo 14 junto (repetido,
+/// o protobuf junta) e onde estão.
+const Top = struct { content: []const u8 };
+
+fn scanTop(ar: std.mem.Allocator, bytes: []const u8) Error!Top {
+    var joined: std.ArrayList(u8) = .empty;
+    var r: Reader = .{ .buf = bytes };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        if (sp.field != guild_folders_field) continue;
+        try wantWire(sp, 2);
+        try joined.appendSlice(ar, sp.data);
+    }
+    return .{ .content = try joined.toOwnedSlice(ar) };
+}
+
+/// As configurações inteiras (`bytes`) com as operações aplicadas nas pastas. Fora do
+/// campo 14, tudo sai exatamente como entrou, no mesmo lugar; sem campo 14, ele entra
+/// no fim. null = nada muda (nada a gravar). `known`: os servidores do app, na ordem
+/// dele (core/pastas.zig `Model.init`). Devolve memória de `gpa`.
+pub fn edit(gpa: std.mem.Allocator, bytes: []const u8, ops: []const pastas.Op, known: []const u64) Error!?[]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const ar = arena.allocator();
+    const top = try scanTop(ar, bytes);
+    const p = try parseStrict(ar, top.content);
+    const before = try pastas.applyAll(ar, p.folders, known, &.{});
+    const after = try pastas.applyAll(ar, p.folders, known, ops);
+    if (pastas.same(before, after)) return null;
+    const content = try encodeEdited(ar, p, after);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, bytes.len + content.len + 8);
+    const w: Writer = .{ .out = &out, .gpa = gpa };
+    var r: Reader = .{ .buf = bytes };
+    var done = false;
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        if (sp.field != guild_folders_field) {
+            try out.appendSlice(gpa, bytes[sp.start..sp.end]);
+            continue;
+        }
+        // O primeiro campo 14 dá lugar ao novo; os outros já estão dentro dele.
+        if (done) continue;
+        done = true;
+        try w.bytes(guild_folders_field, content);
+    }
+    if (!done) try w.bytes(guild_folders_field, content);
+    return try out.toOwnedSlice(gpa);
+}
+
+/// Só o campo 14 de `bytes`, como mensagem própria (repetido, junto num só). Sem
+/// campo 14, vai vazio: o PATCH sempre diz como as pastas ficaram.
+pub fn foldersOnly(gpa: std.mem.Allocator, bytes: []const u8) Error![]u8 {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const top = try scanTop(arena.allocator(), bytes);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try (Writer{ .out = &out, .gpa = gpa }).bytes(guild_folders_field, top.content);
+    return out.toOwnedSlice(gpa);
+}
+
+/// `{"settings":"<só o campo 14>","required_data_version":N}`. Com a versão lida,
+/// o Discord recusa (`out_of_date`) se outro aparelho gravou no meio, em vez de voltar
+/// a mudança dele.
+pub fn patchBody(gpa: std.mem.Allocator, edited: []const u8, version: ?u32) Error![]u8 {
+    const only = try foldersOnly(gpa, edited);
+    defer gpa.free(only);
+    const enc = std.base64.standard.Encoder;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "{\"settings\":\"");
+    const at = out.items.len;
+    try out.resize(gpa, at + enc.calcSize(only.len));
+    _ = enc.encode(out.items[at..], only);
+    try out.append(gpa, '"');
+    if (version) |v| try out.print(gpa, ",\"required_data_version\":{d}", .{v});
+    try out.append(gpa, '}');
+    return out.toOwnedSlice(gpa);
+}
+
+/// As configurações guardadas (`cached`) com uma atualização parcial por cima
+/// (USER_SETTINGS_PROTO_UPDATE com `partial`): cada campo de cima que veio na
+/// atualização troca o mesmo campo das guardadas, inteiro, como o PATCH faz no
+/// servidor; os outros ficam como estavam, na mesma ordem. Os que vieram vão no fim.
+/// Qualquer parte que não dê para ler inteira dá erro (quem chama esquece a cópia).
+pub fn mergeTop(gpa: std.mem.Allocator, cached: []const u8, update: []const u8) Error![]u8 {
+    var present: std.ArrayList(u64) = .empty;
+    defer present.deinit(gpa);
+    var r: Reader = .{ .buf = update };
+    while (!r.done()) {
+        const sp = try nextSpan(&r);
+        if (std.mem.indexOfScalar(u64, present.items, sp.field) == null) try present.append(gpa, sp.field);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.ensureTotalCapacity(gpa, cached.len + update.len);
+    var c: Reader = .{ .buf = cached };
+    while (!c.done()) {
+        const sp = try nextSpan(&c);
+        if (std.mem.indexOfScalar(u64, present.items, sp.field) == null) try out.appendSlice(gpa, cached[sp.start..sp.end]);
+    }
+    try out.appendSlice(gpa, update);
+    return out.toOwnedSlice(gpa);
+}
+
+/// O que o PATCH levou (o campo 14 de `settings` em base64), lido de volta: para o
+/// QA e os testes conferirem os bytes que iriam para o Discord.
+pub fn decodePatch(gpa: std.mem.Allocator, body: []const u8) !Layout {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), body, .{});
+    const b64 = jsonx.str(jsonx.get(v, "settings")) orelse return error.Malformed;
+    return fromProtoBase64(gpa, b64);
+}
+
 // ---------------------------------------------------------------------------
 
 /// Codificador mínimo, só para montar mensagens nos testes.
@@ -512,4 +887,233 @@ test "forma antiga em JSON (user_settings.guild_folders)" {
     const none = try fromJson(a, .null);
     defer none.deinit(a);
     try std.testing.expectEqual(@as(usize, 0), none.folders.len);
+}
+
+// --- Escrita: testes ---------------------------------------------------------
+
+const types = @import("../core/types.zig");
+
+test "codificar e ler de volta: as mesmas pastas" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    const l = try fromProto(a, bytes);
+    defer l.deinit(a);
+    const content = try encodeGuildFolders(a, l.folders);
+    defer a.free(content);
+    var top: TestEnc = .{ .gpa = a };
+    defer top.deinit();
+    try top.fieldBytes(14, content);
+    const back = try fromProto(a, top.out.items);
+    defer back.deinit(a);
+    try std.testing.expect(pastas.same(l.folders, back.folders));
+    // E de novo: a segunda volta é idêntica byte a byte.
+    const again = try encodeGuildFolders(a, back.folders);
+    defer a.free(again);
+    try std.testing.expectEqualSlices(u8, content, again);
+}
+
+test "wrappers: id, nome e cor; nome vazio, sem cor e solto não levam o campo" {
+    const a = std.testing.allocator;
+    const folders = [_]types.GuildFolder{
+        .{ .id = 4567, .name = "Jogos", .color = 0xFF00AA, .guilds = &.{0x0102030405060708} },
+        .{ .id = 300, .name = "", .color = 0, .guilds = &.{ 1, 2 } },
+        .{ .id = 0, .name = "", .color = 0, .guilds = &.{9} },
+    };
+    const got = try encodeGuildFolders(a, &folders);
+    defer a.free(got);
+    const want =
+        // pasta 1: guild_ids empacotado, id {1: 4567}, nome {1: "Jogos"}, cor {1: 0xFF00AA}
+        "\x0a\x1f" ++ "\x0a\x08\x08\x07\x06\x05\x04\x03\x02\x01" ++ "\x12\x03\x08\xd7\x23" ++
+        "\x1a\x07\x0a\x05Jogos" ++ "\x22\x05\x08\xaa\x81\xfc\x07" ++
+        // pasta 2: só servidores e id (300 = \xac\x02)
+        "\x0a\x17" ++ "\x0a\x10\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00" ++ "\x12\x03\x08\xac\x02" ++
+        // solto: só o servidor
+        "\x0a\x0a" ++ "\x0a\x08\x09\x00\x00\x00\x00\x00\x00\x00";
+    try std.testing.expectEqualSlices(u8, want, got);
+}
+
+test "editar: fora do campo 14 nada muda; dentro, a pasta intacta sai como veio" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    const ops = [_]pastas.Op{
+        .{ .edit = .{ .folder = 8, .name = pastas.Name.init("Trabalho") } },
+        .{ .move_guild = .{ .guild = 999, .folder = 8, .where = .start } },
+    };
+    const out = (try edit(a, bytes, &ops, &.{})).?;
+    defer a.free(out);
+    // Antes e depois do 14, idêntico.
+    try std.testing.expectEqualSlices(u8, bytes[0..range[0]], out[0..range[0]]);
+    const tail = bytes[range[1]..];
+    try std.testing.expect(std.mem.endsWith(u8, out, tail));
+    // O "Jogos" (com o campo 9 desconhecido) não mudou: os bytes dele estão lá.
+    var f1: TestEnc = .{ .gpa = a };
+    defer f1.deinit();
+    try f1.fieldPacked64(1, &.{ 111, 222, 333 });
+    try f1.fieldWrapInt(2, 4567);
+    try f1.fieldWrapStr(3, "Jogos");
+    try f1.fieldWrapInt(4, 0xFF00AA);
+    try f1.fieldFixed64(9, 0xdead);
+    try std.testing.expect(std.mem.indexOf(u8, out, f1.out.items) != null);
+    // O campo 7 do GuildFolders (fixed32 1234) continua.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x3d\xd2\x04\x00\x00") != null);
+    const l = try fromProto(a, out);
+    defer l.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), l.folders.len);
+    try std.testing.expectEqualStrings("Trabalho", l.folders[1].name);
+    try std.testing.expectEqual(@as(u64, 8), l.folders[1].id);
+    try std.testing.expectEqualSlices(u64, &.{ 999, 10, 20, 30 }, l.folders[1].guilds);
+    // A ordem antiga vinha: refeita com a ordem nova.
+    try std.testing.expectEqualSlices(u64, &.{ 111, 222, 333, 999, 10, 20, 30 }, l.positions);
+}
+
+test "editar a pasta com campo desconhecido: ele vai junto" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    const out = (try edit(a, bytes, &.{.{ .edit = .{ .folder = 4567, .color = 0x00FF00 } }}, &.{})).?;
+    defer a.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x49\xad\xde\x00\x00\x00\x00\x00\x00") != null);
+    const l = try fromProto(a, out);
+    defer l.deinit(a);
+    try std.testing.expectEqual(@as(u32, 0x00FF00), l.folders[0].color);
+    try std.testing.expectEqualStrings("Jogos", l.folders[0].name);
+}
+
+test "nada muda: nada a gravar; sem campo 14, ele entra no fim" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    try std.testing.expectEqual(null, try edit(a, bytes, &.{.{ .edit = .{ .folder = 4567, .name = pastas.Name.init("Jogos") } }}, &.{}));
+    try std.testing.expectEqual(null, try edit(a, bytes, &.{.{ .move_guild = .{ .guild = 999, .folder = 12345 } }}, &.{}));
+    // Conta sem pastas: os servidores do app viram a lista, com a pasta nova.
+    const head = "\x0a\x02\x18\x05" ++ "\x58\x01";
+    const out = (try edit(a, head, &.{.{ .merge = .{ .guild = 2, .onto = 1, .folder = 50 } }}, &.{ 1, 2, 3 })).?;
+    defer a.free(out);
+    try std.testing.expect(std.mem.startsWith(u8, out, head));
+    const l = try fromProto(a, out);
+    defer l.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), l.folders.len);
+    try std.testing.expectEqual(@as(u64, 50), l.folders[0].id);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, l.folders[0].guilds);
+    try std.testing.expect(l.folders[1].isLoose());
+    try std.testing.expectEqual(@as(usize, 0), l.positions.len);
+}
+
+test "configurações cortadas ou com tipo errado nunca são escritas" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    const op = [_]pastas.Op{.{ .ungroup = 222 }};
+    for (0..bytes.len) |n| {
+        if (edit(a, bytes[0..n], &op, &.{})) |res| {
+            if (res) |o| a.free(o);
+            // Só passa cortado entre campos do topo (e antes do 14, sem pasta nenhuma).
+            try std.testing.expect(n <= range[0] or n >= range[1]);
+        } else |err| try std.testing.expect(err == error.Truncated or err == error.Malformed);
+    }
+    const bad = [_][]const u8{
+        // Campo 14 como varint.
+        "\x70\x01",
+        // Pasta como fixed64.
+        "\x72\x09\x09\x01\x02\x03\x04\x05\x06\x07\x08",
+        // id da pasta como varint (não é wrapper).
+        "\x72\x04\x0a\x02\x10\x05",
+        // nome com o campo 1 como varint.
+        "\x72\x06\x0a\x04\x1a\x02\x08\x01",
+        // guild_ids como varint.
+        "\x72\x04\x0a\x02\x08\x01",
+        // guild_positions como fixed32.
+        "\x72\x05\x15\x01\x02\x03\x04",
+        // Grupo no topo.
+        "\x0b",
+    };
+    for (bad) |b| try std.testing.expectError(error.Malformed, edit(a, b, &op, &.{}));
+}
+
+test "corpo do PATCH: só o campo 14 e a versão" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    const out = (try edit(a, bytes, &.{.{ .remove_folder = 8 }}, &.{})).?;
+    defer a.free(out);
+    const body = try patchBody(a, out, 41);
+    defer a.free(body);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), body, .{});
+    try std.testing.expectEqual(@as(?i64, 41), jsonx.int(jsonx.get(v, "required_data_version")));
+    const b64 = jsonx.str(jsonx.get(v, "settings")).?;
+    const dec = std.base64.standard.Decoder;
+    const sent = try arena.allocator().alloc(u8, try dec.calcSizeForSlice(b64));
+    try dec.decode(sent, b64);
+    // Um campo só, o 14 (0x72), e nada de fora dele.
+    var r: Reader = .{ .buf = sent };
+    const k = try r.key();
+    try std.testing.expectEqual(@as(u64, 14), k.field);
+    _ = try r.bytes();
+    try std.testing.expect(r.done());
+    const l = try decodePatch(a, body);
+    defer l.deinit(a);
+    try std.testing.expectEqual(@as(usize, 5), l.folders.len);
+    try std.testing.expect(l.folders[2].isLoose() and l.folders[3].isLoose() and l.folders[4].isLoose());
+    // Sem a versão: o corpo vai sem ela.
+    const plain = try patchBody(a, out, null);
+    defer a.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "required_data_version") == null);
+}
+
+fn editAndFree(a: std.mem.Allocator, bytes: []const u8) !void {
+    const out = (try edit(a, bytes, &.{ .{ .merge = .{ .guild = 999, .onto = 111, .folder = 5 } }, .{ .edit = .{ .folder = 8, .name = pastas.Name.init("x") } } }, &.{ 1, 2 })).?;
+    defer a.free(out);
+    const body = try patchBody(a, out, 3);
+    a.free(body);
+}
+
+test "editar sem vazamento quando falta memória" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    try std.testing.checkAllAllocationFailures(a, editAndFree, .{bytes});
+}
+
+test "atualização parcial por cima das configurações guardadas" {
+    const a = std.testing.allocator;
+    var range: [2]usize = undefined;
+    const bytes = try testSettings(a, &range);
+    defer a.free(bytes);
+    // Outro aparelho: versions novo e as pastas (só um servidor solto).
+    var up: TestEnc = .{ .gpa = a };
+    defer up.deinit();
+    try up.fieldBytes(1, "\x18\x09");
+    var gf: TestEnc = .{ .gpa = a };
+    defer gf.deinit();
+    try gf.fieldBytes(1, "\x0a\x08\x05\x00\x00\x00\x00\x00\x00\x00");
+    try up.fieldBytes(14, gf.out.items);
+    const merged = try mergeTop(a, bytes, up.out.items);
+    defer a.free(merged);
+    const l = try fromProto(a, merged);
+    defer l.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), l.folders.len);
+    try std.testing.expectEqualSlices(u64, &.{5}, l.folders[0].guilds);
+    // O resto que não veio continua, byte a byte (o campo 8 com o maior varint, o 5000…).
+    try std.testing.expect(std.mem.indexOf(u8, merged, bytes[range[1]..]) != null);
+    try std.testing.expect(std.mem.endsWith(u8, merged, up.out.items));
+    // Nada a mais: o tamanho é o de antes sem o versions e o 14, mais a atualização.
+    var nested: TestEnc = .{ .gpa = a };
+    defer nested.deinit();
+    try nested.fieldVarint(1, 300);
+    try nested.fieldBytes(3, "\x08\x01");
+    const old_versions = 2 + nested.out.items.len;
+    try std.testing.expectEqual(bytes.len - old_versions - (range[1] - range[0]) + up.out.items.len, merged.len);
+    try std.testing.expectError(error.Truncated, mergeTop(a, bytes, "\x72\x05\x01"));
+    try std.testing.expectError(error.Truncated, mergeTop(a, bytes[0 .. bytes.len - 1], up.out.items));
 }

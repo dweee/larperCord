@@ -16,6 +16,7 @@ const w = @import("widgets.zig");
 const types = @import("../core/types.zig");
 const i18n = @import("i18n.zig");
 const icons = @import("icons.zig");
+const pastas_ui = @import("pastas.zig");
 
 pub fn draw(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
     icon_style = std.meta.stringToEnum(IconStyle, d.pstr(n, "icon-style", "fill")) orelse .fill;
@@ -61,9 +62,11 @@ fn folder(ctx: *d.Ctx, dl: *c.ImDrawList, f: *const types.GuildFolder, cx: f32, 
     const ir: d.Rect = .{ .x = cx - size / 2, .y = y, .w = size, .h = size };
     const hb = d.hit(ctx, @truncate(f.id *% 7 +% 5000), ir);
     qa.mark(ir, "folder:{d}", .{f.id});
-    if (hb.clicked) {
+    pastas_ui.slot(.{ .item = .{ .folder = f.id }, .rect = ir, .open = open }, hb);
+    if (pastas_ui.clicked(hb)) {
         if (open) _ = ctx.st.open_folders.remove(f.id) else ctx.st.open_folders.put(ctx.st.gpa, f.id, {}) catch {};
     }
+    if (hb.right) ctx.popup(.{ .menu = .{ .kind = .folder, .id = f.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
     const fcol = if (f.color != 0) d.Rgba.hex(f.color) else ctx.col(.accent);
     const radius = w.shapeRadius(shape, size);
     var mentions: u32 = 0;
@@ -103,13 +106,45 @@ fn folder(ctx: *d.Ctx, dl: *c.ImDrawList, f: *const types.GuildFolder, cx: f32, 
     const pill: f32 = if (selected and !open) size * 0.83 else if (hb.hovered) size * 0.42 else if (unread and !open) 8 else 0;
     const pk = anim.to(anim.id("f-pill", @truncate(f.id)), pill, 18);
     if (pk > 0.5) d.rectFlags(dl, .{ .x = bar.x, .y = y + size / 2 - pk / 2, .w = 4, .h = pk }, ctx.col(.text), 4, c.ImDrawFlags_RoundRight);
-    tooltip(ctx, @truncate(f.id *% 13 +% 7000), ir.right() + 14, y + size / 2, if (f.name.len > 0) f.name else i18n.tr("Pasta", "Folder"), hb.hovered);
+    if (isDragged(.{ .folder = f.id })) d.rect(dl, ir, ctx.col(.rail).alpha(0.6), radius);
+    var lb: [128]u8 = undefined;
+    tooltip(ctx, @truncate(f.id *% 13 +% 7000), ir.right() + 14, y + size / 2, pastas_ui.folderLabel(ctx, f, &lb), hb.hovered and pastas_ui.dragged() == null);
     y += step;
     if (open) for (f.guilds) |gid| if (ctx.store.guild(gid)) |g| {
-        icon(ctx, dl, .{ .g = g, .i = indexOf(ctx, g) }, cx, y, size, shape, .left, bar);
+        icon(ctx, dl, .{ .g = g, .i = indexOf(ctx, g), .parent = f.id }, cx, y, size, shape, .left, bar);
         y += step;
     };
     return y;
+}
+
+/// A coisa da barra que está sendo arrastada (fica apagada no lugar).
+fn isDragged(it: @import("../core/pastas.zig").Item) bool {
+    const dg = pastas_ui.dragged() orelse return false;
+    return std.meta.eql(dg.item, it);
+}
+
+/// O que está sendo arrastado, junto do mouse, por cima de tudo.
+fn dragGhost(ctx: *d.Ctx, size: f32, shape: w.Shape) void {
+    const dg = pastas_ui.dragged() orelse return;
+    const fg = ctx.fg;
+    const s = size * 0.8;
+    const cx = ctx.mouse.x + s * 0.3;
+    const cy = ctx.mouse.y + s * 0.3;
+    switch (dg.item) {
+        .guild => |gid| if (ctx.store.guild(gid)) |g| glyph(ctx, fg, g, cx, cy, s, shape, true),
+        .folder => |fid| if (ctx.store.folderById(fid)) |f| {
+            const fcol = if (f.color != 0) d.Rgba.hex(f.color) else ctx.col(.accent);
+            const r: d.Rect = .{ .x = cx - s / 2, .y = cy - s / 2, .w = s, .h = s };
+            d.rect(fg, r, ctx.col(.elevated), w.shapeRadius(shape, s));
+            d.rect(fg, r, fcol.alpha(0.35), w.shapeRadius(shape, s));
+            folderGlyph(fg, cx, cy, s * 0.42, fcol.mix(d.Rgba.white, 0.2));
+        },
+    }
+}
+
+/// A pasta onde o servidor está (para as barras que não mostram pastas).
+fn parentOf(ctx: *d.Ctx, g: *const types.Guild) u64 {
+    return ctx.store.folderOf(g.id);
 }
 
 fn folderGlyph(dl: *c.ImDrawList, cx: f32, cy: f32, s: f32, col: d.Rgba) void {
@@ -124,6 +159,7 @@ fn verticalBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void 
     const o = c.ImGui_GetCursorScreenPos();
     var y = o.y + 12;
     const cx = r.x + r.w / 2;
+    pastas_ui.begin(.vertical, false, r);
 
     if (d.pflag(n, "home", true)) {
         icon(ctx, dl, null, cx, y, size, shape, .left, r);
@@ -148,7 +184,76 @@ fn verticalBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void 
     tooltip(ctx, 0x7f01, add_r.right() + 14, y + size / 2, i18n.tr("Entrar em um servidor", "Join a server"), add_h.hovered);
     if (add_h.clicked) @import("invites.zig").openJoin(ctx, "");
     y += step;
+    dragGhost(ctx, size, shape);
+    pastas_ui.end(ctx);
     d.endRegion(ctx, y, r.x);
+}
+
+/// O que a barra desenha, em ordem: servidores soltos, pastas e, depois de uma pasta
+/// aberta, os servidores dela.
+const Visual = union(enum) {
+    guild: struct { g: *types.Guild, parent: u64 = 0 },
+    folder: *const types.GuildFolder,
+};
+
+fn visualOrder(ctx: *d.Ctx, out: []Visual) []Visual {
+    var items: [256]Store.RailItem = undefined;
+    var n: usize = 0;
+    for (ctx.store.railOrder(&items)) |it| switch (it) {
+        .guild => |g| if (n < out.len) {
+            out[n] = .{ .guild = .{ .g = g } };
+            n += 1;
+        },
+        .folder => |f| {
+            if (n < out.len) {
+                out[n] = .{ .folder = f };
+                n += 1;
+            }
+            if (ctx.st.open_folders.contains(f.id)) for (f.guilds) |gid| if (ctx.store.guild(gid)) |g| if (n < out.len) {
+                out[n] = .{ .guild = .{ .g = g, .parent = f.id } };
+                n += 1;
+            };
+        },
+    };
+    return out[0..n];
+}
+
+fn toggleFolder(ctx: *d.Ctx, id: u64) void {
+    if (ctx.st.open_folders.contains(id)) _ = ctx.st.open_folders.remove(id) else ctx.st.open_folders.put(ctx.st.gpa, id, {}) catch {};
+}
+
+/// Menções, não lidas e se o servidor aberto está numa pasta.
+const FolderState = struct { mentions: u32 = 0, unread: bool = false, selected: bool = false, count: f32 = 0 };
+
+fn folderState(ctx: *d.Ctx, f: *const types.GuildFolder) FolderState {
+    var st: FolderState = .{};
+    for (f.guilds) |gid| if (ctx.store.guild(gid)) |g| {
+        st.mentions += g.mentions;
+        st.unread = st.unread or g.unread;
+        st.selected = st.selected or ctx.st.guild == g.id;
+        st.count += 1;
+    };
+    return st;
+}
+
+/// O desenho da pasta num quadrado: fechada, até 4 ícones pequenos; aberta, o ícone de pasta.
+fn folderFace(ctx: *d.Ctx, dl: *c.ImDrawList, f: *const types.GuildFolder, ir: d.Rect, shape: w.Shape, open: bool, hovered: bool) void {
+    const fcol = if (f.color != 0) d.Rgba.hex(f.color) else ctx.col(.accent);
+    const radius = w.shapeRadius(shape, ir.w);
+    const cx = ir.x + ir.w / 2;
+    const cy = ir.y + ir.h / 2;
+    if (open) {
+        d.rect(dl, ir, fcol.alpha(if (hovered) 0.4 else 0.28), radius);
+        folderGlyph(dl, cx, cy, ir.w * 0.42, fcol.mix(d.Rgba.white, 0.2));
+        return;
+    }
+    d.rect(dl, ir, fcol.alpha(if (hovered) 0.32 else 0.2), radius);
+    const ms = ir.w * 0.36;
+    const off = ms / 2 + 2;
+    for (f.guilds[0..@min(f.guilds.len, 4)], 0..) |gid, i| {
+        const g = ctx.store.guild(gid) orelse continue;
+        glyph(ctx, dl, g, cx + (if (i % 2 == 0) -off else off), cy + (if (i / 2 == 0) -off else off), ms, shape, false);
+    }
 }
 
 fn horizontalBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
@@ -157,17 +262,13 @@ fn horizontalBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) voi
     const size = @min(d.pnum(n, "size", 36), r.h - 12);
     const labels = d.pflag(n, "labels", false);
     const font = ctx.ui.get(.semibold);
-    var fb: [256]*types.Guild = undefined;
-    const order = flatOrder(ctx, &fb);
+    const fs: f32 = 14;
+    var vb: [320]Visual = undefined;
+    const order = visualOrder(ctx, &vb);
+    var lb: [128]u8 = undefined;
     var content_w: f32 = 10;
     if (d.pflag(n, "home", true)) content_w += size + 12;
-    for (order) |g| {
-        if (!labels) {
-            content_w += size + 10;
-        } else {
-            content_w += size + 10 + d.width(font, 14, g.name) + 16 + 8;
-        }
-    }
+    for (order) |it| content_w += hWidth(ctx, it, size, labels, font, fs, &lb);
     content_w += 10;
 
     c.ImGui_SetCursorScreenPos(d.v(r.x, r.y));
@@ -178,45 +279,93 @@ fn horizontalBar(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) voi
     const sx = c.ImGui_GetScrollX();
     var x = r.x + 10 - sx;
     const cy = r.y + (r.h - 6) / 2;
+    pastas_ui.begin(.horizontal, false, r);
 
     if (d.pflag(n, "home", true)) {
         icon(ctx, dl, null, x + size / 2, cy - size / 2, size, shape, .bottom, r);
         x += size + 12;
     }
-    for (order) |g| {
-        const i = indexOf(ctx, g);
-        if (!labels) {
-            icon(ctx, dl, .{ .g = g, .i = i }, x + size / 2, cy - size / 2, size, shape, .bottom, r);
-            x += size + 10;
-            continue;
+    for (order, 0..) |it, vi| {
+        const step = hWidth(ctx, it, size, labels, font, fs, &lb);
+        switch (it) {
+            .folder => |f| {
+                const open = ctx.st.open_folders.contains(f.id);
+                const fst = folderState(ctx, f);
+                const fcol = if (f.color != 0) d.Rgba.hex(f.color) else ctx.col(.accent);
+                // Faixa atrás da pasta aberta e dos servidores dela.
+                if (open) {
+                    var band_w: f32 = step;
+                    var k = vi + 1;
+                    while (k < order.len and order[k] == .guild and order[k].guild.parent == f.id) : (k += 1) band_w += hWidth(ctx, order[k], size, labels, font, fs, &lb);
+                    d.rect(dl, .{ .x = x - 4, .y = cy - size / 2 - 6, .w = band_w - 2, .h = size + 12 }, fcol.alpha(0.16), w.shapeRadius(shape, size) + 4);
+                }
+                const label = pastas_ui.folderLabel(ctx, f, &lb);
+                const pr: d.Rect = if (labels) .{ .x = x, .y = cy - size / 2 - 3, .w = step - 8, .h = size + 6 } else .{ .x = x, .y = cy - size / 2, .w = size, .h = size };
+                const hb = d.hit(ctx, @truncate(f.id *% 7 +% 5000), pr);
+                qa.mark(pr, "folder:{d}", .{f.id});
+                pastas_ui.slot(.{ .item = .{ .folder = f.id }, .rect = pr, .open = open }, hb);
+                if (pastas_ui.clicked(hb)) toggleFolder(ctx, f.id);
+                if (hb.right) ctx.popup(.{ .menu = .{ .kind = .folder, .id = f.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
+                const face: d.Rect = if (labels) .{ .x = x + 3, .y = cy - size / 2, .w = size, .h = size } else pr;
+                if (labels and hb.hovered) d.rect(dl, pr, fcol.alpha(0.12), pr.h / 2);
+                folderFace(ctx, dl, f, face, shape, open, hb.hovered);
+                if (labels) d.text(dl, font, fs, x + size + 12, d.centerY(pr, fs), if (fst.selected) ctx.col(.text) else ctx.col(.muted), label);
+                if (fst.mentions > 0 and !open) badge(ctx, dl, pr.right() - 2, pr.y + 2, @intCast(@min(fst.mentions, 999)));
+                if (isDragged(.{ .folder = f.id })) d.rect(dl, pr, ctx.col(.rail).alpha(0.6), w.shapeRadius(shape, size));
+                const pill: f32 = if (fst.selected and !open) size * 0.6 else if (fst.unread and !open) 8 else 0;
+                const pk = anim.to(anim.id("hf-pill", @truncate(f.id)), pill, 18);
+                if (show_indicators and pk > 0.5) d.rectFlags(dl, .{ .x = face.x + face.w / 2 - pk / 2, .y = r.bottom() - 4, .w = pk, .h = 3 }, ctx.col(.accent), 3, c.ImDrawFlags_RoundTop);
+                if (!labels and hb.hovered and pastas_ui.dragged() == null) d.tip(ctx, pr, label, true);
+            },
+            .guild => |gg| {
+                const g = gg.g;
+                const i = indexOf(ctx, g);
+                if (!labels) {
+                    icon(ctx, dl, .{ .g = g, .i = i, .parent = gg.parent }, x + size / 2, cy - size / 2, size, shape, .bottom, r);
+                    x += step;
+                    continue;
+                }
+                // Pílula com ícone + nome.
+                const pr: d.Rect = .{ .x = x, .y = cy - size / 2 - 3, .w = step - 8, .h = size + 6 };
+                const hb = d.hit(ctx, 1000 + i, pr);
+                qa.mark(pr, "guild:{d}", .{g.id});
+                pastas_ui.slot(.{ .item = .{ .guild = g.id }, .parent = gg.parent, .rect = pr }, hb);
+                if (pastas_ui.clicked(hb)) ctx.act(.{ .select_guild = g.id });
+                if (hb.right) ctx.popup(.{ .menu = .{ .kind = .guild, .id = g.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
+                const sel = ctx.st.guild == g.id;
+                const k = anim.to(anim.id("hpill", i), if (sel) 1 else if (hb.hovered) 0.45 else 0, 18);
+                d.rect(dl, pr, ctx.col(.accent).alpha(0.16 * k), pr.h / 2);
+                if (sel) d.border(dl, pr, ctx.col(.accent).alpha(0.5), pr.h / 2, 1.5);
+                glyph(ctx, dl, g, x + 3 + size / 2, cy, size, shape, sel or hb.hovered);
+                const tc = if (sel) ctx.col(.text) else ctx.col(.muted).mix(ctx.col(.text), k);
+                d.text(dl, font, fs, x + size + 12, d.centerY(pr, fs), tc, g.name);
+                if (g.mentions > 0) badge(ctx, dl, pr.right() - 2, pr.y + 2, g.mentions);
+                if (isDragged(.{ .guild = g.id })) d.rect(dl, pr, ctx.col(.rail).alpha(0.6), pr.h / 2);
+            },
         }
-        // Pílula com ícone + nome.
-        const fs: f32 = 14;
-        const tw = d.width(font, fs, g.name);
-        const pw = size + 10 + tw + 16;
-        const pr: d.Rect = .{ .x = x, .y = cy - size / 2 - 3, .w = pw, .h = size + 6 };
-        const hb = d.hit(ctx, 1000 + i, pr);
-        qa.mark(pr, "guild:{d}", .{g.id});
-        if (hb.clicked) ctx.act(.{ .select_guild = g.id });
-        if (hb.right) ctx.popup(.{ .menu = .{ .kind = .guild, .id = g.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
-        const sel = ctx.st.guild == g.id;
-        const k = anim.to(anim.id("hpill", i), if (sel) 1 else if (hb.hovered) 0.45 else 0, 18);
-        d.rect(dl, pr, ctx.col(.accent).alpha(0.16 * k), pr.h / 2);
-        if (sel) d.border(dl, pr, ctx.col(.accent).alpha(0.5), pr.h / 2, 1.5);
-        glyph(ctx, dl, g, x + 3 + size / 2, cy, size, shape, sel or hb.hovered);
-        const tc = if (sel) ctx.col(.text) else ctx.col(.muted).mix(ctx.col(.text), k);
-        d.text(dl, font, fs, x + size + 12, d.centerY(pr, fs), tc, g.name);
-        if (g.mentions > 0) badge(ctx, dl, pr.right() - 2, pr.y + 2, g.mentions);
-        x += pw + 8;
+        x += step;
     }
+    dragGhost(ctx, size, shape);
+    pastas_ui.end(ctx);
     // Estabelece a largura do conteúdo para o ImGui criar a rolagem.
     c.ImGui_SetCursorScreenPos(d.v(r.x + content_w - sx, r.y + 1));
     c.ImGui_Dummy(d.v(1, @max(1, r.h - 8)));
 }
 
+/// Quanto cada coisa ocupa na barra horizontal (com o espaço até a próxima).
+fn hWidth(ctx: *d.Ctx, it: Visual, size: f32, labels: bool, font: *c.ImFont, fs: f32, lb: []u8) f32 {
+    if (!labels) return size + 10;
+    const name = switch (it) {
+        .guild => |gg| gg.g.name,
+        .folder => |f| pastas_ui.folderLabel(ctx, f, lb),
+    };
+    return size + 10 + d.width(font, fs, name) + 16 + 8;
+}
+
 const Indicator = enum { left, bottom };
 
-const GuildRef = struct { g: *types.Guild, i: usize };
+/// `parent`: a pasta onde ele está (0 = solto), para arrastar.
+const GuildRef = struct { g: *types.Guild, i: usize, parent: u64 = 0 };
 
 pub const IconStyle = enum { fill, soft, outline };
 
@@ -264,11 +413,12 @@ fn icon(ctx: *d.Ctx, dl: *c.ImDrawList, ref: ?GuildRef, cx: f32, y: f32, size: f
     const ir: d.Rect = .{ .x = cx - size / 2, .y = y, .w = size, .h = size };
     const hb = d.hit(ctx, n, ir);
     qa.mark(ir, "guild:{d}", .{if (ref) |gr| gr.g.id else 0});
+    if (ref) |gr| pastas_ui.slot(.{ .item = .{ .guild = gr.g.id }, .parent = gr.parent, .rect = ir }, hb);
     // O ícone das DMs: aonde o mascote do canto leva a cartinha.
     if (ref == null) mascote_pet.anchorIn(.dm_icon, ir, bar, ctx.now_ms);
     const selected = if (ref) |gr| ctx.st.guild == gr.g.id else ctx.st.guild == 0;
     const active = selected or hb.hovered;
-    if (hb.clicked) ctx.act(.{ .select_guild = if (ref) |gr| gr.g.id else 0 });
+    if (pastas_ui.clicked(hb)) ctx.act(.{ .select_guild = if (ref) |gr| gr.g.id else 0 });
     if (hb.right) if (ref) |gr| ctx.popup(.{ .menu = .{ .kind = .guild, .id = gr.g.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
 
     const base_r = w.shapeRadius(shape, size);
@@ -303,6 +453,7 @@ fn icon(ctx: *d.Ctx, dl: *c.ImDrawList, ref: ?GuildRef, cx: f32, y: f32, size: f
             d.text(dl, font, fs, cx - tw / 2, y + size / 2 - fs * 0.62, ink, g.acronym);
         }
         if (g.mentions > 0) badge(ctx, dl, ir.right() + 2, ir.bottom() - 16, g.mentions);
+        if (isDragged(.{ .guild = g.id })) d.rect(dl, dr, ctx.col(.rail).alpha(0.6), radius);
 
         const target: f32 = if (selected) size * 0.83 else if (hb.hovered) size * 0.42 else if (g.unread) 8 else 0;
         const pill = anim.to(anim.id("g-pill", n), target, 18);
@@ -310,7 +461,7 @@ fn icon(ctx: *d.Ctx, dl: *c.ImDrawList, ref: ?GuildRef, cx: f32, y: f32, size: f
             .left => d.rectFlags(dl, .{ .x = bar.x, .y = y + size / 2 - pill / 2, .w = 4, .h = pill }, ctx.col(.text), 4, c.ImDrawFlags_RoundRight),
             .bottom => d.rectFlags(dl, .{ .x = cx - pill / 2, .y = bar.bottom() - 4, .w = pill, .h = 3 }, ctx.col(.accent), 3, c.ImDrawFlags_RoundTop),
         };
-        if (ind == .left) tooltip(ctx, n, ir.right() + 14, y + size / 2, g.name, hb.hovered);
+        if (ind == .left) tooltip(ctx, n, ir.right() + 14, y + size / 2, g.name, hb.hovered and pastas_ui.dragged() == null);
     } else {
         // Logo: balão de conversa.
         const bg = ctx.col(.elevated).mix(ctx.col(.accent), fill);
@@ -377,6 +528,7 @@ fn textTabs(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
     const sx = c.ImGui_GetScrollX();
     var x = r.x + 8 - sx;
     var buf: [64]u8 = undefined;
+    pastas_ui.begin(.horizontal, true, r);
     // Primeiro as mensagens diretas, como a janela 0 do tmux.
     {
         const sel = ctx.st.guild == 0;
@@ -399,12 +551,23 @@ fn textTabs(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect) void {
         const tr: d.Rect = .{ .x = x, .y = r.y + 2, .w = tw, .h = r.h - 4 };
         const hb = d.hit(ctx, 2000 + i, tr);
         qa.mark(tr, "guild:{d}", .{g.id});
-        if (hb.clicked) ctx.act(.{ .select_guild = g.id });
+        pastas_ui.slot(.{ .item = .{ .guild = g.id }, .parent = parentOf(ctx, g), .rect = tr }, hb);
+        if (pastas_ui.clicked(hb)) ctx.act(.{ .select_guild = g.id });
+        if (hb.right) ctx.popup(.{ .menu = .{ .kind = .guild, .id = g.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
         if (sel) d.rect(dl, tr, ctx.col(.accent), 0) else if (hb.hovered) d.rect(dl, tr, ctx.col(.hover), 0);
         const tc = if (sel) ctx.col(.accent_text) else if (g.mentions > 0) ctx.col(.danger) else if (g.unread) ctx.col(.text) else ctx.col(.muted);
         d.text(dl, if (sel) bold else font, fs, x, d.centerY(tr, fs), tc, lbl);
         x += tw + 2;
     }
+    if (pastas_ui.dragged()) |dg| if (dg.item == .guild) if (ctx.store.guild(dg.item.guild)) |g| {
+        // O nome curto junto do mouse, no estilo das abas.
+        const lbl = std.fmt.bufPrint(&buf, " {s} ", .{g.acronym}) catch "";
+        const tw = d.width(bold, fs, lbl);
+        const gr: d.Rect = .{ .x = ctx.mouse.x + 8, .y = ctx.mouse.y + 4, .w = tw, .h = fs + 6 };
+        d.rect(ctx.fg, gr, ctx.col(.accent), 0);
+        d.text(ctx.fg, bold, fs, gr.x, d.centerY(gr, fs), ctx.col(.accent_text), lbl);
+    };
+    pastas_ui.end(ctx);
     c.ImGui_SetCursorScreenPos(d.v(r.x + content_w - sx, r.y + 1));
     c.ImGui_Dummy(d.v(1, @max(1, r.h - 6)));
 }
@@ -428,6 +591,7 @@ fn dock(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
     // Por cima de tudo, menos das configurações (que cobrem a janela).
     const dl = if (ctx.st.settings.open) ctx.dl else ctx.fg;
     var x = x0 + gap;
+    pastas_ui.begin(.horizontal, true, bg);
     for (0..count) |i| {
         const cx = x + base / 2;
         const dist = @abs(ctx.mouse.x - cx);
@@ -441,7 +605,8 @@ fn dock(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
         if (i == 0) mascote_pet.anchorIn(.dm_icon, ir, r, ctx.now_ms);
         const g: ?*types.Guild = if (i == 0) null else order[i - 1];
         const gid: types.Id = if (g) |x_| x_.id else 0;
-        if (hb.clicked) ctx.act(.{ .select_guild = gid });
+        if (g) |gg| pastas_ui.slot(.{ .item = .{ .guild = gg.id }, .parent = parentOf(ctx, gg), .rect = ir }, hb);
+        if (pastas_ui.clicked(hb)) ctx.act(.{ .select_guild = gid });
         if (hb.right) if (g) |gg| ctx.popup(.{ .menu = .{ .kind = .guild, .id = gg.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
         if (g) |gg| {
             glyph(ctx, dl, gg, cx, ir.y + size / 2, size, shape, true);
@@ -454,7 +619,7 @@ fn dock(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
             d.text(dl, ctx.ui.get(.bold), fs, cx - tw / 2, ir.y + size / 2 - fs * 0.62, ctx.col(.accent_text), t);
         }
         if (ctx.st.guild == gid) d.circle(dl, cx, bg.bottom() - 3, 2.5, ctx.col(.accent));
-        if (hb.hovered) {
+        if (hb.hovered and pastas_ui.dragged() == null) {
             const name = if (g) |gg| gg.name else i18n.tr("Mensagens diretas", "Direct Messages");
             const fs: f32 = 13;
             const tw = d.width(ctx.ui.get(.semibold), fs, name);
@@ -464,6 +629,8 @@ fn dock(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
         }
         x += base + gap;
     }
+    dragGhost(ctx, base, shape);
+    pastas_ui.end(ctx);
 }
 
 /// Lista vertical com ícone + nome (estilo "workspaces" do Slack).
@@ -474,37 +641,78 @@ fn list(ctx: *d.Ctx, n: *const kdl.Node, r: d.Rect, shape: w.Shape) void {
     const dl = d.beginRegion(ctx, "##guildlist", r, c.ImGuiWindowFlags_NoScrollbar);
     const o = c.ImGui_GetCursorScreenPos();
     var y = o.y + 6;
-    var fb: [256]*types.Guild = undefined;
-    const order = flatOrder(ctx, &fb);
+    var vb: [320]Visual = undefined;
+    const order = visualOrder(ctx, &vb);
+    pastas_ui.begin(.vertical, false, r);
     for (0..order.len + 1) |i| {
-        const g: ?*types.Guild = if (i == 0) null else order[i - 1];
+        const it: ?Visual = if (i == 0) null else order[i - 1];
+        // Os servidores de uma pasta aberta, um pouco para dentro.
+        const indent: f32 = if (it) |v| (if (v == .guild and v.guild.parent != 0) @as(f32, 14) else 0) else 0;
+        const rr: d.Rect = .{ .x = r.x + 8 + indent, .y = y, .w = r.w - 16 - indent, .h = row_h - 2 };
+        const cy = rr.y + rr.h / 2;
+        if (it) |v| if (v == .folder) {
+            const f = v.folder;
+            const open = ctx.st.open_folders.contains(f.id);
+            const fst = folderState(ctx, f);
+            const hb = d.hit(ctx, @truncate(f.id *% 7 +% 5000), rr);
+            qa.mark(rr, "folder:{d}", .{f.id});
+            pastas_ui.slot(.{ .item = .{ .folder = f.id }, .rect = rr, .open = open }, hb);
+            if (pastas_ui.clicked(hb)) toggleFolder(ctx, f.id);
+            if (hb.right) ctx.popup(.{ .menu = .{ .kind = .folder, .id = f.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
+            const k = anim.to(anim.id("glist-f", @truncate(f.id)), if (hb.hovered) 0.5 else 0, 22);
+            if (k > 0.01) d.rect(dl, rr, ctx.col(.selected).alpha(k), ctx.th.radius);
+            folderFace(ctx, dl, f, .{ .x = rr.x + 6, .y = cy - size / 2, .w = size, .h = size }, shape, open, hb.hovered);
+            var lb: [128]u8 = undefined;
+            _ = d.textClipped(dl, fam.get(if (fst.unread and !open) .semibold else .medium), 14, rr.x + size + 14, d.centerY(rr, 14), if (fst.selected and !open) ctx.col(.text) else ctx.col(.muted), pastas_ui.folderLabel(ctx, f, &lb), rr.w - size - 52);
+            // Seta: aberta aponta para baixo.
+            const ax = rr.right() - 14;
+            const col = ctx.col(.faint);
+            if (open) {
+                d.line(dl, ax - 4, cy - 2, ax, cy + 2, col, 1.5);
+                d.line(dl, ax, cy + 2, ax + 4, cy - 2, col, 1.5);
+            } else {
+                d.line(dl, ax - 2, cy - 4, ax + 2, cy, col, 1.5);
+                d.line(dl, ax + 2, cy, ax - 2, cy + 4, col, 1.5);
+            }
+            if (fst.mentions > 0 and !open) mentionPill(fam, dl, rr, cy, @intCast(@min(fst.mentions, 999)), 22, ctx);
+            if (isDragged(.{ .folder = f.id })) d.rect(dl, rr, ctx.col(.rail).alpha(0.6), ctx.th.radius);
+            y += row_h;
+            continue;
+        };
+        const g: ?*types.Guild = if (it) |v| v.guild.g else null;
+        const parent: u64 = if (it) |v| v.guild.parent else 0;
         const gid: types.Id = if (g) |x| x.id else 0;
-        const rr: d.Rect = .{ .x = r.x + 8, .y = y, .w = r.w - 16, .h = row_h - 2 };
-        const hb = d.hit(ctx, 4000 + i, rr);
+        const hb = d.hit(ctx, 4000 + (if (g) |gg| indexOf(ctx, gg) + 1 else 0), rr);
         qa.mark(rr, "guild:{d}", .{gid});
         // Na lista, o ícone é o quadradinho do começo da linha.
         if (gid == 0) mascote_pet.anchorIn(.dm_icon, .{ .x = rr.x, .y = rr.y, .w = rr.h, .h = rr.h }, r, ctx.now_ms);
-        if (hb.clicked) ctx.act(.{ .select_guild = gid });
+        if (g) |gg| pastas_ui.slot(.{ .item = .{ .guild = gg.id }, .parent = parent, .rect = rr }, hb);
+        if (pastas_ui.clicked(hb)) ctx.act(.{ .select_guild = gid });
         if (hb.right) if (g) |gg| ctx.popup(.{ .menu = .{ .kind = .guild, .id = gg.id, .x = ctx.mouse.x, .y = ctx.mouse.y } });
         const sel = ctx.st.guild == gid;
-        const k = anim.to(anim.id("glist", i), if (sel) 1 else if (hb.hovered) 0.5 else 0, 22);
+        const k = anim.to(anim.id("glist", if (g) |gg| indexOf(ctx, gg) + 1 else 0), if (sel) 1 else if (hb.hovered) 0.5 else 0, 22);
         if (k > 0.01) d.rect(dl, rr, ctx.col(.selected).alpha(k), ctx.th.radius);
-        const cy = rr.y + rr.h / 2;
         if (g) |gg| glyph(ctx, dl, gg, rr.x + 6 + size / 2, cy, size, shape, sel or hb.hovered) else {
             d.rect(dl, .{ .x = rr.x + 6, .y = cy - size / 2, .w = size, .h = size }, ctx.col(.accent), w.shapeRadius(shape, size));
         }
         const name = if (g) |gg| gg.name else i18n.tr("Mensagens diretas", "Direct Messages");
         const unread = if (g) |gg| gg.unread else false;
         _ = d.textClipped(dl, fam.get(if (sel or unread) .semibold else .medium), 14, rr.x + size + 14, d.centerY(rr, 14), if (sel) ctx.col(.text) else ctx.col(.muted), name, rr.w - size - 40);
-        if (g) |gg| if (gg.mentions > 0) {
-            var buf: [8]u8 = undefined;
-            const t = std.fmt.bufPrint(&buf, "{d}", .{gg.mentions}) catch "";
-            const tw = d.width(fam.get(.bold), 11, t);
-            const br: d.Rect = .{ .x = rr.right() - tw - 16, .y = cy - 9, .w = tw + 10, .h = 18 };
-            d.rect(dl, br, ctx.col(.danger), 9);
-            d.text(dl, fam.get(.bold), 11, br.x + 5, d.centerY(br, 11), d.Rgba.white, t);
-        };
+        if (g) |gg| if (gg.mentions > 0) mentionPill(fam, dl, rr, cy, gg.mentions, 0, ctx);
+        if (g) |gg| if (isDragged(.{ .guild = gg.id })) d.rect(dl, rr, ctx.col(.rail).alpha(0.6), ctx.th.radius);
         y += row_h;
     }
+    dragGhost(ctx, size + 8, shape);
+    pastas_ui.end(ctx);
     d.endRegion(ctx, y + 6, r.x);
+}
+
+/// O número de menções no fim da linha da lista (`right_pad`: espaço a mais à direita).
+fn mentionPill(fam: *d.Family, dl: *c.ImDrawList, rr: d.Rect, cy: f32, count: u16, right_pad: f32, ctx: *d.Ctx) void {
+    var buf: [8]u8 = undefined;
+    const t = std.fmt.bufPrint(&buf, "{d}", .{count}) catch "";
+    const tw = d.width(fam.get(.bold), 11, t);
+    const br: d.Rect = .{ .x = rr.right() - tw - 16 - right_pad, .y = cy - 9, .w = tw + 10, .h = 18 };
+    d.rect(dl, br, ctx.col(.danger), 9);
+    d.text(dl, fam.get(.bold), 11, br.x + 5, d.centerY(br, 11), d.Rgba.white, t);
 }

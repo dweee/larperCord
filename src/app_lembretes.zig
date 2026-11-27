@@ -81,7 +81,7 @@ pub fn check(app: *App) bool {
 /// notificações ligadas e fora do "Não perturbe".
 fn notify(app: *App, r: *const core.Reminder, n: usize) void {
     const set = &app.st.settings;
-    const flags = c.SDL_GetWindowFlags(app.win.window);
+    const flags = app.win.flags();
     const hidden = app.in_tray or flags & c.SDL_WINDOW_HIDDEN != 0;
     // O QA roda fora da tela, sem foco de verdade: vale o "faz de conta" dele.
     const focused = !hidden and if (app.opts.qa) !app.qa_blur else flags & c.SDL_WINDOW_INPUT_FOCUS != 0;

@@ -117,6 +117,7 @@ pub fn hide() void {
     fake_on = false;
     if (tray) |t| c.SDL_DestroyTray(t);
     tray = null;
+    if (sys.windows) tray_hwnd = null;
     stopHelper();
 }
 
@@ -336,6 +337,15 @@ pub fn hostSeen(now_ms: i64) bool {
 /// menu). Se a janela não for achada, fica o de antes: o esquerdo também abre o menu.
 const wm_trayicon: c_uint = if (sys.windows) c.WM_USER + 1 else 0;
 var sdl_proc: if (sys.windows) c.WNDPROC else void = if (sys.windows) null else {};
+/// A janela escondida do ícone (Windows). Com a principal fora, na bandeja (App.releaseGpu),
+/// o balão das notificações vai por ela (app_notificacao.zig).
+var tray_hwnd: ?*anyopaque = null;
+
+/// A janela do ícone da bandeja, onde houver (só no Windows, com o ícone de pé).
+pub fn nativeWindow() ?*anyopaque {
+    if (!sys.windows) return null;
+    return tray_hwnd;
+}
 var last_click_ms: i64 = -1;
 
 fn hookClicks() void {
@@ -348,6 +358,7 @@ fn findTrayWindow(hwnd: c.HWND, _: c.LPARAM) callconv(.c) c.BOOL {
     const n = c.GetClassNameW(hwnd, &name, name.len);
     const want = std.unicode.utf8ToUtf16LeStringLiteral("SDL_TRAY");
     if (n != want.len or !std.mem.eql(u16, name[0..want.len], want)) return 1;
+    tray_hwnd = @ptrCast(hwnd);
     const prev = c.GetWindowLongPtrW(hwnd, c.GWLP_WNDPROC);
     const mine: c.LONG_PTR = @bitCast(@intFromPtr(&trayProc));
     if (prev != mine) {

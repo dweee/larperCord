@@ -22,7 +22,7 @@ const Combinacao = comb.Combinacao;
 pub const Grupo = enum { geral, janela, abas, voz, caixa, vim };
 
 /// Os atalhos que dá para trocar.
-pub const Acao = enum { paleta, paleta_acoes, buscar, configuracoes, caixa_entrada, salvas, proximo_tema, tema_anterior, tela_cheia, proxima_aba, aba_anterior, fechar_aba, proximo_conjunto, mutar, ensurdecer, reiniciar, gravar_audio };
+pub const Acao = enum { paleta, paleta_acoes, buscar, configuracoes, caixa_entrada, salvas, proximo_tema, tema_anterior, tela_cheia, proxima_aba, aba_anterior, fechar_aba, proximo_conjunto, mutar, ensurdecer, reiniciar, gravar_audio, inspetor, inspetor_selecionar };
 const n_acoes = @typeInfo(Acao).@"enum".field_names.len;
 
 pub const Atalho = struct {
@@ -57,12 +57,20 @@ pub const lista = [_]Atalho{
     .{ .grupo = .geral, .pt = "Copiar o texto selecionado nas mensagens", .en = "Copy the text selected in messages", .teclas = "Ctrl+C" },
     .{ .grupo = .geral, .pt = "Tocar ou pausar o áudio sob o mouse", .en = "Play or pause the audio under the mouse", .teclas = "Space", .teclas_pt = "Espaço" },
     .{ .grupo = .geral, .pt = "Voltar ou avançar 5 s no áudio sob o mouse", .en = "Skip back or forward 5 s in the audio under the mouse", .teclas = "← / →" },
+    .{ .grupo = .geral, .pt = "Vídeo em tela cheia (o do mouse ou o que está tocando)", .en = "Video in fullscreen (the one under the mouse or playing)", .teclas = "F" },
+    .{ .grupo = .geral, .pt = "Sair do vídeo em tela cheia", .en = "Leave the fullscreen video", .teclas = "Esc / F" },
+    .{ .grupo = .geral, .pt = "Tocar ou pausar o vídeo em tela cheia", .en = "Play or pause the fullscreen video", .teclas = "Space", .teclas_pt = "Espaço" },
+    .{ .grupo = .geral, .pt = "Voltar ou avançar 5 s no vídeo em tela cheia", .en = "Skip back or forward 5 s in the fullscreen video", .teclas = "← / →" },
+    .{ .grupo = .geral, .pt = "Volume do vídeo em tela cheia", .en = "Fullscreen video volume", .teclas = "↑ / ↓" },
+    .{ .grupo = .geral, .pt = "Tirar ou voltar o som do vídeo em tela cheia", .en = "Mute or unmute the fullscreen video", .teclas = "M" },
     .{ .grupo = .janela, .pt = "Próximo tema", .en = "Next theme", .teclas = "F2 / Ctrl+T", .acao = .proximo_tema },
     .{ .grupo = .janela, .pt = "Tema anterior", .en = "Previous theme", .teclas = "Shift+F2 / Ctrl+Shift+T", .acao = .tema_anterior },
     .{ .grupo = .janela, .pt = "Aumentar ou diminuir a interface", .en = "Make the interface bigger or smaller", .teclas = "Ctrl + / Ctrl -" },
     .{ .grupo = .janela, .pt = "Interface no tamanho normal", .en = "Interface at normal size", .teclas = "Ctrl 0" },
     .{ .grupo = .janela, .pt = "Tela cheia", .en = "Fullscreen", .teclas = "F11 / Alt+Enter", .acao = .tela_cheia },
     .{ .grupo = .janela, .pt = "Reiniciar o larperCord", .en = "Restart larperCord", .teclas = "Ctrl+R", .acao = .reiniciar },
+    .{ .grupo = .janela, .pt = "Inspetor (ferramentas de desenvolvedor)", .en = "Inspector (developer tools)", .teclas = "F12 / Ctrl+Shift+I", .acao = .inspetor },
+    .{ .grupo = .janela, .pt = "Selecionar um elemento para inspecionar", .en = "Select an element to inspect", .teclas = "Ctrl+Shift+E", .acao = .inspetor_selecionar },
     .{ .grupo = .abas, .pt = "Próxima aba", .en = "Next tab", .teclas = "Ctrl+Tab", .acao = .proxima_aba },
     .{ .grupo = .abas, .pt = "Aba anterior", .en = "Previous tab", .teclas = "Ctrl+Shift+Tab", .acao = .aba_anterior },
     .{ .grupo = .abas, .pt = "Ir para a aba N", .en = "Go to tab N", .teclas = "Alt+1…9" },

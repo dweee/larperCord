@@ -35,6 +35,7 @@ const media_url = @import("media_url.zig");
 const proxy = @import("proxy.zig");
 const challenge = @import("challenge.zig");
 const settings_proto = @import("settings_proto.zig");
+const pastas_net = @import("pastas_net.zig");
 const status_proto = @import("status_proto.zig");
 const leitura = @import("../core/leitura.zig");
 const read_json = @import("read_state_json.zig");
@@ -46,11 +47,16 @@ const thread_json = @import("thread_json.zig");
 const user_json = @import("user_json.zig");
 const face_json = @import("face_json.zig");
 const member_ask = @import("member_ask.zig");
+const member_search = @import("member_search.zig");
 const envio_json = @import("envio_json.zig");
 const envio = @import("../core/envio.zig");
+const envio_limpo = @import("envio_limpo.zig");
+const temporarios = @import("../platform/temporarios.zig");
 const gw_budget = @import("gw_budget.zig");
 const saida = @import("saida_servidor.zig");
 const registro = @import("registro_rede.zig");
+const insp = @import("../inspect/registros.zig");
+const insp_curl = @import("../inspect/curl_insp.zig");
 const limits_json = @import("limits_json.zig");
 const debug_log = @import("../platform/debug_log.zig");
 const conta_net = @import("conta_net.zig");
@@ -68,10 +74,8 @@ const Value = std.json.Value;
 const alloc = std.heap.c_allocator;
 const links = @import("../core/links.zig");
 const entrada = @import("../core/entrada.zig");
-const api = "https://discord.com/api/v10";
-/// A busca vai na versão que o cliente do Discord usa (o caminho já traz o /v9).
-const api_root = "https://discord.com/api";
-const gateway_host = "wss://gateway.discord.gg";
+/// A API e o gateway (fixos; no executável do QA, o Discord de mentira local).
+const enderecos = @import("enderecos.zig");
 /// Query do gateway: JSON + compressão zlib-stream (a mesma do cliente oficial).
 const gateway_query = "v=10&encoding=json&compress=zlib-stream";
 /// Identifica-se como o cliente web do Discord (as três constantes saem do
@@ -146,7 +150,11 @@ pub const Gateway = struct {
     /// pedido recusado para a fila (achado pelo nonce, ou o mais novo daquele servidor).
     /// Do tamanho da fila: um RESUMED que solta tudo de uma vez não sobrescreve nenhum.
     members_sent: [16]member_ask.Sent = @splat(.{}),
+    /// O número do próximo op 8 (dos autores e da busca: o `nonce` diz qual é qual).
     members_seq: u32 = 0,
+    /// A busca do `@` (op 8 com `query`, net/member_search.zig): o que a caixa quer, o que
+    /// já veio e o que saiu. A fila e a janela são as do `outbox`.
+    search: member_search.Searcher = .{},
     /// Última lista de membros pedida (op 14): repetida depois de um READY.
     sub_guild: Id = 0,
     sub_channel: Id = 0,
@@ -176,6 +184,9 @@ pub const Gateway = struct {
     pending: std.ArrayList(ev.Command) = .empty,
     /// Estrelas de GIF esperando o fim da volta do laço (`flushFavorites`).
     fav_batch: std.ArrayList(ev.GifFavorite) = .empty,
+    /// A última cópia das configurações gerais (READY, USER_SETTINGS_PROTO_UPDATE,
+    /// respostas do PATCH): as pastas gravam a partir dela (net/pastas_net.zig).
+    settings1: pastas_net.Cache = .{},
     /// Comandos que vão pelo próprio gateway (op 3, 4, 14): só valem depois
     /// do READY/RESUMED (antes, o Discord fecha com 4003 e o pedido se perde).
     held: std.ArrayList(ev.Command) = .empty,
@@ -249,6 +260,11 @@ pub const Gateway = struct {
         g.conta.deinit();
         for (g.fav_batch.items) |f| freeCommand(.{ .gif_favorite = f });
         g.fav_batch.deinit(alloc);
+        g.settings1.deinit();
+    }
+
+    pub fn settingsCache(g: *Gateway) *pastas_net.Cache {
+        return &g.settings1;
     }
 
     const RoleInfo = struct { color: u32, pos: i64 };
@@ -306,7 +322,9 @@ pub const Gateway = struct {
             const lived: ?i64 = if (g.ws_ready) nowMs() - g.ws_ready_ms else null;
             g.ws_ready = false;
             retry.sessionEnded(lived);
-            if (retry.justStartedFlapping() and lived != null) g.notice("a conexão está caindo logo depois de conectar; vou tentar com mais calma", "the connection keeps dropping right after connecting; retrying more slowly", .{});
+            // Recusa de vez (4004, 4010-4014): não há tentativa nenhuma depois, e o aviso de
+            // "vou tentar com mais calma" tomaria o lugar do motivo na tela de entrada.
+            if (retry.justStartedFlapping() and lived != null and result != .fatal) g.notice("a conexão está caindo logo depois de conectar; vou tentar com mais calma", "the connection keeps dropping right after connecting; retrying more slowly", .{});
             switch (result) {
                 .fatal => {
                     g.emit(.{ .status = .failed });
@@ -331,7 +349,7 @@ pub const Gateway = struct {
                 .retry => {
                     g.emit(.{ .status = .reconnecting });
                     const proxy_gen = proxy.generation();
-                    g.sleepServing(retry.next(random));
+                    g.sleepServing(enderecos.espera(retry.next(random)));
                     // Proxy novo: as esperas começam de novo do mínimo.
                     if (proxy.generation() != proxy_gen) retry = .{};
                 },
@@ -339,14 +357,14 @@ pub const Gateway = struct {
                     g.emit(.{ .status = .reconnecting });
                     // O Discord pediu depois de uma sessão estável: volta logo. Caindo sem parar:
                     // nada de um IDENTIFY por segundo.
-                    g.sleepServing(if (retry.fresh) 1000 + random.uintLessThan(u32, 500) else retry.next(random));
+                    g.sleepServing(enderecos.espera(if (retry.fresh) 1000 + random.uintLessThan(u32, 500) else retry.next(random)));
                 },
                 .new_session => {
                     // Sessão inválida/expirada: o Discord manda esperar de
                     // 1 a 5 segundos antes de abrir uma nova.
                     g.clearSession();
                     g.emit(.{ .status = .reconnecting });
-                    g.sleepServing(1000 + random.uintLessThan(u32, 4000) + (if (retry.fresh) 0 else retry.next(random)));
+                    g.sleepServing(enderecos.espera(1000 + random.uintLessThan(u32, 4000) + (if (retry.fresh) 0 else retry.next(random))));
                 },
             }
         }
@@ -408,6 +426,7 @@ pub const Gateway = struct {
             .gif_search => |q| g.emit(.{ .gifs = .{ .req = q.req, .ok = false } }),
             .gif_favorites => |req| g.emit(.{ .gifs = .{ .req = req, .favorites = true, .ok = false } }),
             .gif_favorite => |f| g.emit(.{ .gifs = .{ .req = f.req, .favorites = true, .ok = false } }),
+            .folders => |f| g.emit(.{ .folders_saved = .{ .seq = f.seq, .ok = false } }),
             .refresh_urls => g.emit(.{ .urls_refreshed = &.{} }),
             .fetch_sticker_packs => g.emit(.{ .sticker_packs = .{ .ok = false } }),
             .fetch_invite => |code| g.emit(.{ .invite = .{ .code = code, .invite = .{ .state = .failed } } }),
@@ -417,6 +436,7 @@ pub const Gateway = struct {
             .fetch_bans => |fb| g.emit(.{ .bans = .{ .req = fb.req, .guild = fb.guild, .ok = false } }),
             .fetch_threads => |ft| g.emit(.{ .threads_page = .{ .channel = ft.channel, .archived = ft.archived, .private = ft.private, .failed = true } }),
             .entrada => |e| g.emit(.{ .entrada = entrada.dropped(e) }),
+            .search_members => |q| if (q.len > 0) g.emit(.{ .member_search = .{ .q = q, .result = .dropped } }),
             .interaction => |ic| switch (ic) {
                 .send => |s| g.emit(.{ .interaction = .{ .failed = .{ .nonce = s.nonce } } }),
                 .fetch_commands => |sc| g.emit(.{ .interaction = .{ .commands = .{ .key = sc.key(), .index = null } } }),
@@ -511,7 +531,7 @@ pub const Gateway = struct {
         sys.curlTlsWebSocket(h);
         g.ws = h;
         var url_buf: [512]u8 = undefined;
-        const base = if (g.resume_len > 0) g.resume_base[0..@as(usize, g.resume_len)] else gateway_host;
+        const base = if (g.resume_len > 0) g.resume_base[0..@as(usize, g.resume_len)] else enderecos.gateway();
         const url = gatewayUrl(&url_buf, base) orelse return .retry;
         _ = c.curl_easy_setopt(h, c.CURLOPT_URL, url.ptr);
         _ = c.curl_easy_setopt(h, c.CURLOPT_CONNECT_ONLY, @as(c_long, 2));
@@ -523,8 +543,8 @@ pub const Gateway = struct {
             hs_headers = c.curl_slist_append(hs_headers, "Origin: https://discord.com");
             defer if (hs_headers) |list| c.curl_slist_free_all(list);
             if (hs_headers) |list| _ = c.curl_easy_setopt(h, c.CURLOPT_HTTPHEADER, list);
-            _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, "https,wss");
-            _ = c.curl_easy_setopt(h, c.CURLOPT_REDIR_PROTOCOLS_STR, "https,wss");
+            _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, enderecos.protocolosWs());
+            _ = c.curl_easy_setopt(h, c.CURLOPT_REDIR_PROTOCOLS_STR, enderecos.protocolosWs());
             const via_proxy = useProxy(h);
             g.abortable(h);
             const rc = c.curl_easy_perform(h);
@@ -552,6 +572,11 @@ pub const Gateway = struct {
         g.frame.clearRetainingCapacity();
         g.zout.clearRetainingCapacity();
         g.shrinkBuffers();
+        // O HELLO pode vir junto com a resposta do aperto de mão: aí o curl já o leu para
+        // dentro dele, o socket não tem mais nada e o poll lá embaixo só acordaria no teto
+        // de 1 s (o IDENTIFY ou o RESUME saíam 1 s atrasados a cada conexão).
+        g.serviceWs();
+        if (g.ws_end) |e| return e;
 
         var cmds: std.ArrayList(ev.Command) = .empty;
         defer cmds.deinit(alloc);
@@ -604,10 +629,12 @@ pub const Gateway = struct {
         }
     }
 
-    /// Depois de um READY grande os buffers ficam com vários MB reservados:
-    /// devolve o que passar de 1 MB.
+    /// Depois de um READY grande os buffers ficam com vários MB reservados: devolve o que
+    /// passar de 64 KiB. Fora o READY e as listas de membros, um evento cabe nisso; com o
+    /// limite de 1 MiB de antes, os dois buffers seguravam ~1,7 MB a sessão inteira numa conta
+    /// grande (tools/ram_conta_grande.sh).
     fn shrinkBuffers(g: *Gateway) void {
-        const limit = 1024 * 1024;
+        const limit = 64 * 1024;
         if (g.frame.capacity > limit and g.frame.items.len == 0) g.frame.clearAndFree(alloc);
         if (g.zout.capacity > limit and g.zout.items.len == 0) g.zout.clearAndFree(alloc);
     }
@@ -702,6 +729,18 @@ pub const Gateway = struct {
         g.flushOutbox();
     }
 
+    /// A busca do `@` (net/member_search.zig): entra na fila no lugar da que esperava, ou
+    /// nem entra (já respondida, coberta, a caminho, op 8 de lá acabado). Cada pedido da
+    /// caixa recebe uma resposta (`member_search`).
+    fn searchMembers(g: *Gateway, q: member_search.Query) void {
+        g.replySearch(g.search.ask(&g.outbox, q, monoMs()));
+        g.flushOutbox();
+    }
+
+    fn replySearch(g: *Gateway, out: member_search.Replies) void {
+        for (out.slice()) |r| g.emit(.{ .member_search = r });
+    }
+
     /// Manda o que tem vez agora (só depois do READY/RESUMED: antes, o Discord
     /// fecha com 4003).
     fn flushOutbox(g: *Gateway) void {
@@ -759,6 +798,19 @@ pub const Gateway = struct {
                 g.members_seq +%= 1;
                 return true;
             },
+            // A busca do `@` (net/member_search.zig), na janela do op 8 daquele servidor.
+            .search => |q| {
+                var buf: [512]u8 = undefined;
+                const seq = g.members_seq;
+                const p = member_search.payload(&buf, &q, seq) orelse return true;
+                if (debug_log.isOn()) std.log.info("gateway: op 8 buscando \"{s}\" no servidor {d}", .{ q.text(), q.guild });
+                if (!g.writeWs(p)) return false;
+                const sent_at = monoMs();
+                _ = g.outbox.hold(q.guild, sent_at + gw_budget.members_window_ms, sent_at);
+                if (g.search.wrote(q, seq)) |lost| g.emit(.{ .member_search = lost });
+                g.members_seq +%= 1;
+                return true;
+            },
             // Quando começou a call de cada canal de voz (net/voice_info_json.zig).
             .channel_info => |gid| {
                 var buf: [160]u8 = undefined;
@@ -810,6 +862,7 @@ pub const Gateway = struct {
             var lb: [64]u8 = undefined;
             if (registro.opLine(&lb, payload)) |line| std.log.info("gateway: saiu {s}", .{line});
         }
+        insp.gwOut(.main, payload);
         return true;
     }
 
@@ -903,6 +956,7 @@ pub const Gateway = struct {
         const root = std.json.parseFromSliceLeaky(Value, arena.allocator(), text, .{}) catch return null;
         const parsed_at = timeline.now();
         const op = j.int(j.get(root, "op")) orelse return null;
+        if (insp.gravando()) insp.gw.add(.main, .in, text, op, j.int(j.get(root, "s")), j.str(j.get(root, "t")));
         switch (op) {
             10 => {
                 const d = j.get(root, "d") orelse return null;
@@ -1196,20 +1250,7 @@ pub const Gateway = struct {
     /// Passa as pastas para o Store (só se vieram: uma atualização parcial
     /// sem pastas não apaga as que já temos).
     fn emitFolders(g: *Gateway, layout: settings_proto.Layout) void {
-        defer layout.deinit(alloc);
-        if (layout.folders.len == 0) return;
-        const out = alloc.alloc(types.GuildFolder, layout.folders.len) catch return;
-        var n: usize = 0;
-        for (layout.folders) |f| {
-            const guilds = alloc.dupe(Id, f.guilds) catch continue;
-            const name = alloc.dupe(u8, f.name) catch {
-                alloc.free(guilds);
-                continue;
-            };
-            out[n] = .{ .id = f.id, .name = name, .color = f.color, .guilds = guilds };
-            n += 1;
-        }
-        g.emit(.{ .guild_folders = out[0..n] });
+        g.emit(.{ .guild_folders = pastas_net.toFolders(layout, false) orelse return });
     }
 
     /// Grupo da lista de membros: "online", "offline" ou o ID de um cargo.
@@ -1297,6 +1338,7 @@ pub const Gateway = struct {
     /// conexão voltar não sai, e a call de lá acaba aqui também. Do lado do Discord ela
     /// já acabou: sem op 4 para sair, e sem tentar voltar com o token velho.
     fn leftGuild(g: *Gateway, id: Id) void {
+        g.replySearch(g.search.leftGuild(&g.outbox, id));
         g.outbox.forgetGuild(id);
         if (g.sub_guild == id) {
             g.sub_guild = 0;
@@ -1358,6 +1400,7 @@ pub const Gateway = struct {
             // Um op 8 escrito logo antes da queda pode não ter chegado: quem estava nos
             // pedidos sem resposta volta a poder ser pedido (no ritmo da fila).
             member_ask.releaseSent(&g.members_ask, &g.members_sent);
+            g.replySearch(g.search.lost());
             // O gateway reenviou o que perdemos; o estado local continua válido. O op 4
             // escrito pouco antes da queda que não teve resposta nesses eventos se perdeu:
             // vai de novo, antes do que ainda espera na fila.
@@ -1550,6 +1593,7 @@ pub const Gateway = struct {
             if ((j.int(j.get(st, "type")) orelse 0) != 1) return;
             const b64 = j.str(j.get(st, "proto")) orelse return;
             const partial = if (j.get(d, "partial")) |pv| pv == .bool and pv.bool else false;
+            g.settings1.update(b64, partial);
             conta_net.onProtoUpdate(g, b64, partial);
             if (settings_proto.fromProtoBase64(alloc, b64)) |layout| g.emitFolders(layout) else |_| {}
             return;
@@ -1695,6 +1739,12 @@ pub const Gateway = struct {
             };
             if (j.id(j.get(d, "guild_id"))) |gid| g.outbox.membersAnswered(gid);
             g.ingestMembers(j.id(j.get(d, "guild_id")) orelse 0, d);
+            // A resposta de uma busca do `@`: depois dos membros (a lista se refaz com eles).
+            if (j.str(j.get(d, "nonce"))) |nonce| if (member_search.nonceSeq(nonce)) |seq| {
+                const last = (j.int(j.get(d, "chunk_index")) orelse 0) + 1 >= (j.int(j.get(d, "chunk_count")) orelse 1);
+                g.replySearch(g.search.answered(&g.outbox, seq, j.array(j.get(d, "members")).len, last));
+                g.flushOutbox();
+            };
             return;
         }
         if (std.mem.eql(u8, t, "MESSAGE_REACTION_REMOVE_ALL")) {
@@ -1882,6 +1932,13 @@ pub const Gateway = struct {
     /// servidor nenhum, todo op 8 espera.
     fn membersLimited(g: *Gateway, d: Value) void {
         var lim = member_ask.limited(d);
+        // Uma busca do `@` (nonce "s…"): o servidor espera do mesmo jeito, e ela só volta se
+        // a caixa ainda a quer (net/member_search.zig `limited`).
+        if (j.str(j.get(j.get(d, "meta") orelse Value.null, "nonce"))) |nonce| if (member_search.nonceSeq(nonce)) |seq| {
+            g.replySearch(g.search.limited(&g.outbox, monoMs(), seq, lim.guild, lim.wait_ms));
+            g.flushOutbox();
+            return;
+        };
         var back: ?member_ask.Request = null;
         if (member_ask.pickSent(&g.members_sent, lim)) |x| {
             back = x.req;
@@ -1890,6 +1947,8 @@ pub const Gateway = struct {
             x.req.guild = 0;
         }
         if (!g.outbox.holdMembers(monoMs(), lim.guild, lim.wait_ms, if (back) |*r| r else null)) g.members_ask.unmark(&back.?);
+        // Sem o nosso nonce, pode ter sido uma busca daquele servidor: fica sem resposta.
+        g.replySearch(if (lim.seq == null) g.search.limitedUnknown(&g.outbox, lim.guild) else g.search.afterRefusal(&g.outbox));
         g.flushOutbox();
     }
 
@@ -2866,6 +2925,7 @@ pub const Gateway = struct {
         for (g.outbox.members[0..g.outbox.members_n]) |*w| g.members_ask.unmark(&w.req);
         // O que saiu na sessão velha e não teve resposta não vai ter mais.
         member_ask.releaseSent(&g.members_ask, &g.members_sent);
+        g.replySearch(g.search.newSession(&g.outbox));
         g.outbox.forgetPending();
         g.voice_unconfirmed = null;
         // Servidores que deixamos com a conexão caída (kick, ban): o READY não os traz e
@@ -2897,12 +2957,12 @@ pub const Gateway = struct {
             @memcpy(g.session_id[0..n], sid[0..n]);
             g.session_len = n;
         }
-        if (j.str(j.get(d, "resume_gateway_url"))) |base| {
+        if (j.str(j.get(d, "resume_gateway_url"))) |base| if (enderecos.retomadaAceita(base)) {
             const n: u8 = @intCast(@min(base.len, g.resume_base.len));
             g.resume_base = @splat(0);
             @memcpy(g.resume_base[0..n], base[0..n]);
             g.resume_len = n;
-        }
+        };
 
         var users: std.ArrayList(types.User) = .empty;
         var seen: std.AutoHashMapUnmanaged(Id, void) = .empty;
@@ -3016,6 +3076,7 @@ pub const Gateway = struct {
         // Pastas e ordem dos servidores: protobuf das configurações (contas
         // atuais) ou o JSON antigo.
         if (j.str(j.get(d, "user_settings_proto"))) |b64| {
+            g.settings1.remember(b64);
             if (settings_proto.fromProtoBase64(alloc, b64)) |layout| g.emitFolders(layout) else |_| {}
         } else if (j.get(d, "user_settings")) |us| if (j.get(us, "guild_folders")) |gf| {
             if (settings_proto.fromJson(alloc, gf)) |layout| g.emitFolders(layout) else |_| {}
@@ -3116,11 +3177,18 @@ pub const Gateway = struct {
         reset_after_ms: ?u32 = null,
         retry_after_ms: ?u32 = null,
         global: bool = false,
+        /// Os cabeçalhos da resposta inteiros, para a aba Rede do Inspetor (só gravando).
+        insp: ?*std.ArrayList(u8) = null,
     };
 
     /// Configurações → Rede com "em tudo": gateway e API também pelo proxy (o
     /// gateway muda na próxima conexão). true = vai pelo proxy.
     fn useProxy(h: *c.CURL) bool {
+        // O Discord de mentira do QA é local: nem o proxy das configurações nem o do ambiente.
+        if (enderecos.local()) {
+            _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, "");
+            return false;
+        }
         var pb: proxy.Buf = undefined;
         const p = proxy.forDiscord(&pb) orelse return false;
         _ = c.curl_easy_setopt(h, c.CURLOPT_PROXY, p.ptr);
@@ -3171,6 +3239,7 @@ pub const Gateway = struct {
         const total = size * n;
         const rh: *RateInfo = @ptrCast(@alignCast(user.?));
         const line = ptr[0..total];
+        if (rh.insp) |out| insp_curl.responseHeader(out, line);
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return total;
         const name = std.mem.trim(u8, line[0..colon], " \t");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \r\n\t ");
@@ -3280,7 +3349,7 @@ pub const Gateway = struct {
             return null;
         }
         var url_buf: [1400]u8 = undefined;
-        const url = std.fmt.bufPrintSentinel(&url_buf, "{s}{s}", .{ if (std.mem.startsWith(u8, path, "/v9/")) api_root else api, path }, 0) catch return null;
+        const url = std.fmt.bufPrintSentinel(&url_buf, "{s}{s}", .{ if (std.mem.startsWith(u8, path, "/v9/")) enderecos.apiRaiz() else enderecos.api(), path }, 0) catch return null;
         var auth_buf: [256]u8 = undefined;
         defer std.crypto.secureZero(u8, &auth_buf);
         const auth = std.fmt.bufPrintSentinel(&auth_buf, "Authorization: {s}", .{g.token}, 0) catch return null;
@@ -3295,6 +3364,8 @@ pub const Gateway = struct {
         var failed_buf: [40]u8 = undefined;
 
         var attempt: u8 = 0;
+        // Para o Inspetor: quanto este pedido esperou o rate limit antes de sair.
+        var waited_ms: i64 = 0;
         while (attempt < 3) : (attempt += 1) {
             // O cliente oficial só dispara a próxima requisição quando o
             // balde do rate limit libera; fazemos o mesmo.
@@ -3311,6 +3382,7 @@ pub const Gateway = struct {
                 // já ter desistido.
                 if (deadline != 0 and until >= deadline) return null;
                 g.sleepServing(@intCast(until - now));
+                waited_ms += until - now;
                 if (g.stopping) return null;
             }
             if (deadline != 0 and nowMs() >= deadline) return null;
@@ -3352,12 +3424,24 @@ pub const Gateway = struct {
             defer c.curl_slist_free_all(headers);
             var rate: RateInfo = .{};
             var resp: Response = .{ .status = 0, .body = .empty };
+            // A aba Rede do Inspetor: o pedido como saiu (sem o Authorization) e, no fim, a resposta.
+            var insp_resp_h: std.ArrayList(u8) = .empty;
+            defer insp_resp_h.deinit(alloc);
+            const insp_id = if (insp.gravando()) blk: {
+                var req_h: std.ArrayList(u8) = .empty;
+                defer req_h.deinit(alloc);
+                insp_curl.requestHeaders(&req_h, headers, web_user_agent);
+                rate.insp = &insp_resp_h;
+                const shown: ?[]const u8 = if (mime != null) "(multipart: arquivos enviados)" else body;
+                break :blk insp.net.begin(.api, method, url, req_h.items, shown, "gateway");
+            } else 0;
             c.curl_easy_reset(h);
             sys.curlTls(h);
             // A URL é fixa (discord.com/api), mas restringir o protocolo
-            // impede que um redirect ou proxy mal configurado vire http.
-            _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, "https");
-            _ = c.curl_easy_setopt(h, c.CURLOPT_REDIR_PROTOCOLS_STR, "https");
+            // impede que um redirect ou proxy mal configurado vire http (só o
+            // Discord de mentira do QA, em 127.0.0.1, fala http).
+            _ = c.curl_easy_setopt(h, c.CURLOPT_PROTOCOLS_STR, enderecos.protocolosRest());
+            _ = c.curl_easy_setopt(h, c.CURLOPT_REDIR_PROTOCOLS_STR, enderecos.protocolosRest());
             _ = c.curl_easy_setopt(h, c.CURLOPT_URL, url.ptr);
             _ = c.curl_easy_setopt(h, c.CURLOPT_HTTPHEADER, headers);
             _ = c.curl_easy_setopt(h, c.CURLOPT_USERAGENT, web_user_agent.ptr);
@@ -3382,7 +3466,17 @@ pub const Gateway = struct {
                 _ = c.curl_easy_setopt(h, c.CURLOPT_POSTFIELDS, "");
                 _ = c.curl_easy_setopt(h, c.CURLOPT_POSTFIELDSIZE, @as(c_long, 0));
             }
-            if (c.curl_easy_perform(h) != c.CURLE_OK) {
+            const perform_rc = c.curl_easy_perform(h);
+            if (insp_id != 0) {
+                var e: insp.NetLog.End = .{ .attempt = attempt, .resp_headers = insp_resp_h.items, .waited_ms = @intCast(std.math.clamp(waited_ms, 0, std.math.maxInt(u32))) };
+                insp_curl.endInfo(h, &e);
+                if (perform_rc != c.CURLE_OK) {
+                    e.failed = true;
+                    e.note = std.mem.span(c.curl_easy_strerror(perform_rc));
+                } else e.resp_body = resp.body.items;
+                insp.net.end(insp_id, e);
+            }
+            if (perform_rc != c.CURLE_OK) {
                 resp.body.deinit(alloc);
                 g.notice("sem conexão com a API do Discord", "no connection to the Discord API", .{});
                 return null;
@@ -3431,6 +3525,7 @@ pub const Gateway = struct {
                 }
                 g.notice("o Discord pediu calma: esperando {d} ms", "Discord asked us to slow down: waiting {d} ms", .{wait_ms});
                 g.sleepServing(wait_ms + 100);
+                waited_ms += wait_ms + 100;
                 if (g.stopping) return null;
                 continue;
             }
@@ -3525,6 +3620,7 @@ pub const Gateway = struct {
                 alloc.free(f.shown);
             },
             .forward_message => |f| alloc.free(f.text),
+            .folders => |f| pastas_net.free(f),
             .ack_bulk => |list| if (list.len > 0) alloc.free(list),
             .refresh_urls => |list| {
                 for (list) |u| alloc.free(u);
@@ -4154,6 +4250,7 @@ pub const Gateway = struct {
             },
             // Vai para `fav_batch` antes deste switch (`queueFavorite`).
             .gif_favorite => unreachable,
+            .folders => |f| pastas_net.save(g, f),
             .fetch_invite => |code| {
                 const failed: ev.Event = .{ .invite = .{ .code = code, .invite = .{ .state = .failed } } };
                 const path = std.fmt.bufPrint(&path_buf, "/invites/{s}?with_counts=true&with_expiration=true", .{code.slice()}) catch return;
@@ -4232,6 +4329,17 @@ pub const Gateway = struct {
                     .files = m.file_opts,
                 }) catch return;
                 const path = std.fmt.bufPrint(&path_buf, "/channels/{d}/messages", .{m.channel}) catch return;
+                // Foto e vídeo sem a localização e os dados da câmera: vai uma cópia limpa,
+                // apagada quando o pedido acaba (net/envio_limpo.zig).
+                var limpos: [10]envio_limpo.Preparo = @splat(.original);
+                defer for (limpos[0..nf]) |lp| envio_limpo.soltar(lp);
+                if (m.strip_metadata) for (m.files[0..nf], 0..) |f, i| {
+                    limpos[i] = envio_limpo.preparar(f);
+                    if (limpos[i] == .falhou) {
+                        g.emit(.{ .send_failed = .{ .channel = m.channel, .nonce = m.nonce } });
+                        return g.notice("não deu para tirar a localização de {s}; a mensagem não foi enviada", "couldn't remove the location from {s}; the message wasn't sent", .{names[i]});
+                    }
+                };
                 var mime: ?*c.curl_mime = null;
                 defer if (mime) |mp| c.curl_mime_free(mp);
                 if (m.files.len > 0) {
@@ -4246,14 +4354,20 @@ pub const Gateway = struct {
                         const field = std.fmt.bufPrintSentinel(&nbuf, "files[{d}]", .{i}, 0) catch return;
                         const fp = c.curl_mime_addpart(mp);
                         _ = c.curl_mime_name(fp, field.ptr);
-                        _ = c.curl_mime_filedata(fp, f.ptr);
+                        const limpo = switch (limpos[i]) {
+                            .limpo => |l| l,
+                            else => null,
+                        };
+                        _ = c.curl_mime_filedata(fp, (limpo orelse f).ptr);
                         // O tipo que o navegador mandaria onde o curl não sabe (.ogg: audio/ogg).
                         if (envio_json.partType(names[i])) |t| _ = c.curl_mime_type(fp, t.ptr);
-                        // Spoiler: o nome do arquivo na parte também leva o SPOILER_.
-                        if (i < m.file_opts.len and m.file_opts[i].spoiler) {
+                        // Spoiler: o nome do arquivo na parte também leva o SPOILER_. A cópia
+                        // limpa tem o mesmo nome, mas o nome vai escrito para não depender do curl.
+                        const spoiler = i < m.file_opts.len and m.file_opts[i].spoiler;
+                        if (spoiler or limpo != null) {
                             var sb: [300]u8 = undefined;
                             var zb: [301]u8 = undefined;
-                            const sname = std.fmt.bufPrintSentinel(&zb, "{s}", .{envio_json.uploadName(&sb, names[i], true)}, 0) catch continue;
+                            const sname = std.fmt.bufPrintSentinel(&zb, "{s}", .{envio_json.uploadName(&sb, names[i], spoiler)}, 0) catch continue;
                             _ = c.curl_mime_filename(fp, sname.ptr);
                         }
                     }
@@ -4273,10 +4387,8 @@ pub const Gateway = struct {
                 if (resp.status >= 300) g.emit(failed);
                 if (resp.status == 413) return g.notice("arquivo grande demais para o Discord (limite de 10 MB sem Nitro)", "file too large for Discord (10 MB limit without Nitro)", .{});
                 if (resp.status >= 300) return g.noticeHttp(i18n.tr("não foi possível enviar", "couldn't send"), &resp);
-                // A imagem colada era um arquivo temporário nosso: já foi.
-                for (m.files) |f| if (types.isPastedFile(f)) {
-                    _ = c.unlink(f.ptr);
-                };
+                // A imagem colada (ou editada) era um arquivo temporário nosso: já foi.
+                for (m.files) |f| if (types.isPastedFile(f)) temporarios.apagar(f);
             },
             .edit_message => |m| {
                 var b: std.ArrayList(u8) = .empty;
@@ -4335,6 +4447,7 @@ pub const Gateway = struct {
                 g.subscribe(sg.guild, sg.channel, sg.thread);
             },
             .channel_info => |gid| g.queueOp(.{ .channel_info = gid }),
+            .search_members => |q| g.searchMembers(q),
             .relationship => |r| {
                 const path = std.fmt.bufPrint(&path_buf, "/users/@me/relationships/{d}", .{r.user}) catch return;
                 // De onde foi o clique, como o cliente oficial manda.

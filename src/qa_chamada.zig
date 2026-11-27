@@ -244,7 +244,7 @@ fn ringsDm1(_: *App) bool {
     return overlayFor(dm1) and voz_audio.ringing();
 }
 fn ringingHidden(app: *App) bool {
-    const hidden = c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_HIDDEN != 0;
+    const hidden = app.win.flags() & c.SDL_WINDOW_HIDDEN != 0;
     return hidden and chamada.ring_channel == dm2 and voz_audio.ringing() and chamada.notified == notified0 + 1;
 }
 /// O que foi digitado antes e depois de a chamada chegar está todo na caixa.

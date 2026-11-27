@@ -50,6 +50,9 @@
 #include <curl/curl.h>
 #include <webp/decode.h>
 #include <webp/demux.h>
+/* O codificador de WebP animado (libwebpmux): os clipes dos GIFs favoritos (ui/gif_clips.zig). */
+#include <webp/encode.h>
+#include <webp/mux.h>
 #include <opus/opus.h>
 #include <dave/dave.h>
 #define STBI_NO_STDIO

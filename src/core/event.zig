@@ -14,6 +14,8 @@ const UrlPair = @import("media_refresh.zig").Pair;
 const moderacao = @import("moderacao.zig");
 const entrada = @import("entrada.zig");
 const interaction = @import("interaction.zig");
+const member_search = @import("../net/member_search.zig");
+const pastas = @import("pastas.zig");
 const Id = types.Id;
 
 pub const Ready = struct {
@@ -180,6 +182,10 @@ pub const Event = union(enum) {
     /// CHANNEL_INFO (resposta ao op 43): os canais de voz do servidor que têm call
     /// agora; os que não vieram não têm. A lista é alocada e passa para o Store.
     channel_info: struct { guild: Id, starts: []VoiceStart },
+    /// Como terminou um `search_members` (net/member_search.zig): respondido (os membros
+    /// já vieram antes, nos `member_info`/`member_face` de sempre), coberto por uma
+    /// resposta anterior, ou sem resposta.
+    member_search: member_search.Reply,
     /// VOICE_CHANNEL_START_TIME_UPDATE: a call de um canal começou (`start_s`, s
     /// Unix) ou acabou (0).
     voice_start: struct { guild: Id, channel: Id, start_s: i64 },
@@ -209,6 +215,10 @@ pub const Event = union(enum) {
     member_face: struct { guild: Id, user: Id, face: types.Face = .{}, keep_nick: bool = false, keep_avatar: bool = false },
     /// Ordem dos servidores e pastas (READY / mudança nas configurações).
     guild_folders: []types.GuildFolder,
+    /// Terminou a gravação das pastas até a mudança `seq` (`Command.folders`). `folders`:
+    /// como ficaram na conta (a resposta do PATCH, ou o que estava lá se não deu para
+    /// gravar); null = não deu nem para ler (a barra volta ao que o Store sabia).
+    folders_saved: struct { seq: u32, ok: bool, folders: ?[]types.GuildFolder = null },
     /// Perfil completo de alguém (o Store assume os textos).
     profile: struct { user: Id, profile: types.Profile },
     /// Amizade/pedido/bloqueio (`none` = deixou de existir).
@@ -336,6 +346,11 @@ pub const ImageChange = union(enum) {
 /// Um GIF que entra ou sai dos favoritos. `url` é a chave (o link da mensagem);
 /// `src` é o que fica guardado (o MP4 com `video`, como o app oficial guarda) e
 /// `shown`, o que a lista mostra até a resposta chegar.
+/// Pastas da barra mudadas aqui (core/pastas.zig): as operações desde a última
+/// gravação, até a de número `seq`, e os servidores do app na ordem dele (`known`;
+/// os que a conta não cita entram na lista). As listas com o c_allocator.
+pub const FolderEdit = struct { seq: u32, ops: []const pastas.Op, known: []const Id };
+
 pub const GifFavorite = struct {
     req: u32 = 0,
     add: bool,
@@ -351,7 +366,9 @@ pub const Command = union(enum) {
     /// `files`: caminhos dos arquivos a enviar (alocados, terminados em 0).
     /// `opts`: silenciosa, sem prévias, menções. `file_opts`: spoiler e texto
     /// alternativo de cada arquivo (alocados; pode ter menos que `files`).
-    send_message: struct { channel: Id, content: []const u8, nonce: u64, reply_to: Id = 0, files: []const [:0]const u8 = &.{}, opts: envio.SendOpts = .{}, file_opts: []const envio.FileOpt = &.{} },
+    /// `strip_metadata`: foto e vídeo vão numa cópia sem localização nem dados da câmera
+    /// (Configurações → Privacidade; net/envio_limpo.zig).
+    send_message: struct { channel: Id, content: []const u8, nonce: u64, reply_to: Id = 0, files: []const [:0]const u8 = &.{}, opts: envio.SendOpts = .{}, file_opts: []const envio.FileOpt = &.{}, strip_metadata: bool = false },
     edit_message: struct { channel: Id, id: Id, content: []const u8 },
     leave_guild: Id,
     /// `text`: cópia do conteúdo, só para a demonstração (o Discord já tem a original).
@@ -397,6 +414,10 @@ pub const Command = union(enum) {
     /// Quando começou a call de cada canal de voz de um servidor (op 43, Request
     /// Channel Info): chega como `channel_info`. Uma vez por servidor e sessão.
     channel_info: Id,
+    /// A busca do `@` na caixa de texto (op 8 com `query`, net/member_search.zig): só a
+    /// última vale, e sai depois de uma pausa na digitação, no ritmo do op 8 daquele
+    /// servidor. `len` 0 cancela a que espera. Cada uma volta como `member_search`.
+    search_members: member_search.Query,
     /// Aceita um pedido de amizade (true) ou remove/recusa/cancela (false).
     /// `from`: de onde foi o clique (o `X-Context-Properties`, core/conta.zig).
     relationship: struct { user: Id, accept: bool, from: @import("conta.zig").Origin },
@@ -456,6 +477,10 @@ pub const Command = union(enum) {
     /// Liga ou desliga um GIF favorito: lê as configurações da conta de novo, muda só
     /// os favoritos e grava (PATCH). Volta como `gifs` com `favorites`. Textos alocados.
     gif_favorite: GifFavorite,
+    /// Pastas da barra: o gateway lê as configurações (tipo 1) de novo, aplica as
+    /// operações e grava só o campo das pastas (PATCH), como as estrelas dos GIFs.
+    /// Volta como `folders_saved`.
+    folders: FolderEdit,
     pin: struct { channel: Id, id: Id, add: bool },
     fetch_invite: InviteCode,
     join_invite: InviteCode,
@@ -495,6 +520,8 @@ pub const Command = union(enum) {
 
 pub const Action = union(enum) {
     search_messages: SearchRequest,
+    /// A busca do `@` (ui/autocomplete.zig) para a rede: `Command.search_members`.
+    search_members: member_search.Query,
     /// Aceitar/recusar pedido de mensagem, pôr/tirar gente do grupo, sair dele.
     social: Social,
     select_guild: Id,
@@ -532,6 +559,9 @@ pub const Action = union(enum) {
     open_settings,
     close_settings,
     toggle_fullscreen,
+    /// A janela entra (ou sai) da tela cheia do sistema pelo vídeo em tela cheia, e
+    /// volta como estava (ui/video.zig, `janela`).
+    video_tela_cheia: bool,
     /// Grava as configurações (uma mudança que não passa pela tela delas).
     save_settings,
     reply: Id,
@@ -565,6 +595,8 @@ pub const Action = union(enum) {
     /// `id` 0 só abre o canal.
     open_message: struct { channel: Id, id: Id },
     mark_read: Id,
+    /// "Marcar pasta como lida": os servidores da pasta `id` (core/pastas.zig).
+    mark_folder_read: u64,
     /// A conversa está no fim e a janela em foco: lida de verdade.
     channel_seen: Id,
     /// O "×" numa nota de plugin embaixo da mensagem.
@@ -586,6 +618,9 @@ pub const Action = union(enum) {
     gif_favorites,
     /// Estrela de um GIF (na conversa ou no seletor). Textos alocados em `st.gpa`.
     gif_favorite: GifFavorite,
+    /// Mudou as pastas da barra (arrastando ou pelos menus): a tela muda na hora e a
+    /// conta grava (app_pastas.zig).
+    pasta: pastas.Op,
     want_pins: Id,
     /// "Carregar mais" no fim das fixadas.
     more_pins: Id,
@@ -622,6 +657,9 @@ pub const Action = union(enum) {
     /// Um arquivo só, para a opção de anexo de um comando de bot (ui/interact.zig).
     pick_file,
     remove_upload: usize,
+    /// O editor da bandeja (ui/editor_imagem.zig) terminou: o arquivo `index` passa a ser
+    /// o PNG editado em `path` (c_allocator, na pasta temporária nossa).
+    replace_upload: struct { index: usize, path: [:0]u8, size: u64, width: u16, height: u16 },
     /// Ctrl+V com uma imagem na área de transferência.
     paste_image,
     /// O áudio gravado na caixa (ui/gravar_audio.zig), já salvo no arquivo

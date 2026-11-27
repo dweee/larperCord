@@ -163,13 +163,13 @@ fn hideToTray(app: *App) void {
     _ = c.SDL_PushEvent(&e);
 }
 fn inTray(app: *App) bool {
-    return app.in_tray and c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_HIDDEN != 0;
+    return app.in_tray and app.win.flags() & c.SDL_WINDOW_HIDDEN != 0;
 }
 fn showAgain(app: *App) void {
     platform.Window.wake(app.win.wake_type, .show);
 }
 fn shown(app: *App) bool {
-    return !app.in_tray and c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_HIDDEN == 0;
+    return !app.in_tray and app.win.flags() & c.SDL_WINDOW_HIDDEN == 0;
 }
 fn trayBack(_: *App) void {
     tray.hide();

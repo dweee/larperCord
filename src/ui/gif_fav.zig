@@ -57,6 +57,8 @@ pub fn isOn(ctx: *d.Ctx, key: []const u8) bool {
 pub fn toggle(ctx: *d.Ctx, key: []const u8, shown: []const u8, w: u16, h: u16, on: bool) void {
     var vb: [600]u8 = undefined;
     const video = media_url.videoFromGif(&vb, shown);
+    // O clipe que a estrela faz sai no tamanho desta tela (ui/gif_clips.zig).
+    @import("gif_clips.zig").scale = ctx.io.*.DisplayFramebufferScale.x;
     const gpa = ctx.st.gpa;
     const url = gpa.dupe(u8, key) catch return;
     const src = gpa.dupe(u8, video orelse shown) catch {

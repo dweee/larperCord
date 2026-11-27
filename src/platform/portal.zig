@@ -101,7 +101,7 @@ pub const Bus = struct {
 
     pub fn open(wake_type: u32) ?Bus {
         var d: dbus.Fns = undefined;
-        const lib = dbus.load(&d) orelse return null;
+        const lib = dbus.loadInto(&d) orelse return null;
         if (d.dbus_threads_init_default() == 0) {
             c.SDL_UnloadObject(lib);
             return null;

@@ -77,6 +77,11 @@ const commands = [_]Command{
             for (ctx.store.channelsOf(0)) |id| ctx.act(.{ .mark_read = id });
         }
     }.f },
+    .{ .pt = "Inspetor (ferramentas de desenvolvedor)", .en = "Inspector (developer tools)", .run = struct {
+        fn f(_: *d.Ctx) void {
+            @import("../inspect/ui.zig").open();
+        }
+    }.f },
     .{ .pt = "Próximo tema", .en = "Next theme", .run = simple(.{ .next_theme = 1 }) },
     .{ .pt = "Tema anterior", .en = "Previous theme", .run = simple(.{ .next_theme = -1 }) },
     .{ .pt = "Modo escuro", .en = "Dark mode", .run = colorMode(0) },
@@ -178,14 +183,17 @@ const toggle_names = [_]struct { field: []const u8, pt: []const u8, en: []const 
     .{ .field = "audio_visualizer", .pt = "Visualizador de áudio", .en = "Audio visualizer" },
     .{ .field = "show_spoilers", .pt = "Sempre mostrar spoilers", .en = "Always show spoilers" },
     .{ .field = "md_preview", .pt = "Prévia do markdown", .en = "Markdown preview" },
+    .{ .field = "md_bar", .pt = "Barra de formatação", .en = "Formatting bar" },
     .{ .field = "open_at_unread", .pt = "Abrir na primeira não lida", .en = "Open at the first unread" },
     .{ .field = "send_typing", .pt = "Enviar indicador de digitação", .en = "Send typing indicator" },
+    .{ .field = "strip_metadata", .pt = "Tirar a localização e os dados da câmera de fotos e vídeos", .en = "Remove location and camera details from photos and videos" },
     .{ .field = "rich_presence", .pt = "Compartilhar minha atividade (Rich Presence)", .en = "Share my activity (Rich Presence)" },
     .{ .field = "show_game", .pt = "Mostrar o jogo aberto", .en = "Show the game you're running" },
     .{ .field = "message_log", .pt = "Registro de mensagens", .en = "Message log" },
     .{ .field = "gif_hosts", .pt = "Animar GIFs do Tenor e do Giphy", .en = "Animate Tenor and Giphy GIFs" },
     .{ .field = "streamer_mode", .pt = "Modo streamer", .en = "Streamer Mode" },
     .{ .field = "desktop_notifs", .pt = "Notificações na área de trabalho", .en = "Desktop notifications" },
+    .{ .field = "notif_reply", .pt = "Responder pela notificação", .en = "Reply from the notification" },
     .{ .field = "taskbar_flash", .pt = "Piscar na barra de tarefas", .en = "Flash taskbar" },
     .{ .field = "message_sound", .pt = "Som de mensagem nova", .en = "New message sound" },
     .{ .field = "vim_keys", .pt = "Navegação estilo vim", .en = "Vim-style navigation" },

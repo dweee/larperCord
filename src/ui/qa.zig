@@ -4,6 +4,7 @@
 //! Desligado (custo zero) fora do modo `--qa`.
 const std = @import("std");
 const layout = @import("../theme/layout.zig");
+const insp = @import("../inspect/captura.zig");
 
 /// Só os builds com o robô (debug, ou -Dqa=true) têm isto; nos outros, cada
 /// marcação some na compilação (código, textos e os 300 KB de tabelas abaixo).
@@ -60,7 +61,15 @@ fn full() bool {
     return true;
 }
 
+/// O Inspetor, num build com o robô, mostra o nome de cada coisa (e o ctl acha por ele).
+fn toInspector(r: layout.Rect, comptime fmt: []const u8, args: anytype) void {
+    if (!compiled or !insp.recording()) return;
+    var b: [72]u8 = undefined;
+    insp.mark(r, std.fmt.bufPrint(&b, fmt, args) catch return);
+}
+
 pub fn mark(r: layout.Rect, comptime fmt: []const u8, args: anytype) void {
+    toInspector(r, fmt, args);
     if (!on() or full()) return;
     const C = @import("c");
     const dl = C.ImGui_GetWindowDrawList();
@@ -78,6 +87,7 @@ pub fn mark(r: layout.Rect, comptime fmt: []const u8, args: anytype) void {
 /// tudo): não pede a janela atual, que fora de uma janela é a "Debug" escondida do
 /// ImGui; pedir a lista de desenho dela a mostra na tela, e ela engole os cliques.
 pub fn markTop(r: layout.Rect, comptime fmt: []const u8, args: anytype) void {
+    toInspector(r, fmt, args);
     if (!on() or full()) return;
     var m: Mark = .{ .key = undefined, .len = 0, .rect = r, .clip = .{ .x = -100_000, .y = -100_000, .w = 200_000, .h = 200_000 } };
     @memcpy(m.key[0..scope_len], scope_buf[0..scope_len]);

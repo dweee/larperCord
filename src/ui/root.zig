@@ -30,6 +30,8 @@ const display = @import("display_text.zig");
 const backdrop = @import("backdrop.zig");
 const resize = @import("resize.zig");
 const plugin_panel = @import("plugin_panel.zig");
+const insp = @import("../inspect/captura.zig");
+const video = @import("video.zig");
 
 const Component = *const fn (*d.Ctx, *const kdl.Node, d.Rect) void;
 
@@ -113,9 +115,13 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
     rich.emoji_images = @import("emoji_img.zig").enabled(ctx);
     vim.beforeFrame(ctx.st);
     ctx.win = .{ .x = vp.*.Pos.x, .y = vp.*.Pos.y, .w = vp.*.Size.x, .h = vp.*.Size.y };
+    // Inspetor encaixado: o app inteiro (layout e sobreposições) cabe no que sobra.
+    ctx.win = @import("../inspect/doca.zig").reserve(ctx.win);
 
     d.opt_theme = ctx.th;
     fx.beginFrame();
+    // Vídeo em tela cheia: só ele, e o resto do app nem é montado (nem gasta).
+    if (video.fullscreen()) return videoFull(ctx);
     if (ctx.th.layout) |root| {
         const Look = struct {
             fn get(p: *const anyopaque, name: []const u8) ?bool {
@@ -144,6 +150,10 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
         defer ctx.th = base_theme;
         var local: theme_mod.Theme = undefined;
         for (placed.items, 0..) |p, i| {
+            // O Inspetor vê cada pedaço do layout (contêiner ou componente) com o que ele desenhou.
+            const insp_scope = insp.scope(p.node.name, p.rect, p.node, p.depth, p.kind == .component);
+            const insp_t0 = if (insp.recording()) c.SDL_GetTicksNS() else 0;
+            defer insp.endScope(insp_scope, if (insp_t0 != 0) (c.SDL_GetTicksNS() - insp_t0) / 1000 else 0);
             // Cores sobrescritas neste pedaço do layout.
             ctx.th = base_theme;
             if (base_theme.node_colors.get(p.node)) |ovs| {
@@ -173,39 +183,98 @@ pub fn frame(ctx: *d.Ctx, placed: *std.ArrayList(layout.Placed), previews: []con
         }
     }
     // Por cima dos painéis, por baixo do que flutua (a lista do autocompletar).
+    var sc = insp.scope("resize", ctx.win, null, 0, false);
     resize.submit(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("plugin-panel", ctx.win, null, 0, false);
     plugin_panel.draw(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("lsp", ctx.win, null, 0, false);
     @import("lsp_ui.zig").panel(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("autocomplete", ctx.win, null, 0, false);
     @import("autocomplete.zig").draw(ctx);
+    insp.endScope(sc, 0);
     c.ImGui_End();
 
     const t1 = if (profile) c.SDL_GetTicksNS() else 0;
     // O popup aberto na janela flutuante é desenhado lá (app_flutuante.zig).
     popup.claim(ctx.st, false);
+    // O editor de imagem fechou no quadro anterior: a textura e a imagem saem antes de
+    // qualquer desenho deste.
+    @import("editor_imagem.zig").varrer(ctx.st);
+    sc = insp.scope("popup", ctx.win, null, 0, false);
     if (!popup.in_pip) popup.draw(ctx);
+    insp.endScope(sc, 0);
     // Formulário de comando e modal de bot: por cima dos popups.
+    sc = insp.scope("interact", ctx.win, null, 0, false);
     @import("interact.zig").draw(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("settings", ctx.win, null, 0, false);
     settings.draw(ctx, previews);
+    insp.endScope(sc, 0);
     if (profile) profAdd("overlays", (c.SDL_GetTicksNS() - t1) / 1000);
+    sc = insp.scope("viewer", ctx.win, null, 0, false);
     @import("attachments.zig").viewer(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("palette", ctx.win, null, 0, false);
     palette.draw(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("search", ctx.win, null, 0, false);
     search.draw(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("toast", ctx.win, null, 0, false);
     toast(ctx);
+    insp.endScope(sc, 0);
     // Exportar conversa e salvar mídia: a resposta do seletor, o andamento e o resultado.
+    sc = insp.scope("export", ctx.win, null, 0, false);
     @import("exportar.zig").frame(ctx);
     @import("exportar.zig").cards(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("banner", ctx.win, null, 0, false);
     connectionBanner(ctx);
     @import("aviso_atualizacao.zig").draw(ctx);
+    insp.endScope(sc, 0);
     // Lembrete vencido: o aviso fica até alguém mexer (o mascote do canto, desenhado
     // logo depois, vem por cima dele trazer o bilhete).
+    sc = insp.scope("reminder", ctx.win, null, 0, false);
     @import("lembretes.zig").notice(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("mascot", ctx.win, null, 0, false);
     @import("mascote_pet.zig").draw(ctx);
+    insp.endScope(sc, 0);
     // Chamada chegando: por cima de tudo, em qualquer tema.
+    sc = insp.scope("incoming-call", ctx.win, null, 0, false);
     @import("chamada.zig").overlay(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("shortcuts", ctx.win, null, 0, false);
     shortcuts(ctx);
+    insp.endScope(sc, 0);
     // A conversão do IME num campo que não é a caixa do chat: por cima de tudo, no cursor dele.
     @import("ime.zig").floating(ctx);
     // O que abriu depois dos popups (Configurações, paleta, atalhos) também é desta janela.
+    popup.claim(ctx.st, false);
+}
+
+/// O quadro com o vídeo em tela cheia (ui/video.zig): ele por cima de tudo, com o teclado
+/// dele. Por cima dele, só o aviso passageiro e a chamada chegando; dos atalhos, ficam o
+/// mudo e o ensurdecer (os outros abririam coisas por baixo do vídeo).
+fn videoFull(ctx: *d.Ctx) void {
+    c.ImGui_End();
+    popup.claim(ctx.st, false);
+    @import("editor_imagem.zig").varrer(ctx.st);
+    var sc = insp.scope("video", ctx.win, null, 0, false);
+    video.drawFull(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("toast", ctx.win, null, 0, false);
+    toast(ctx);
+    insp.endScope(sc, 0);
+    sc = insp.scope("incoming-call", ctx.win, null, 0, false);
+    @import("chamada.zig").overlay(ctx);
+    insp.endScope(sc, 0);
+    const kb = &ctx.st.teclas;
+    if (teclas.pressed(kb, ctx.io, .mutar, false)) ctx.act(.toggle_mute);
+    if (teclas.pressed(kb, ctx.io, .ensurdecer, false)) ctx.act(.toggle_deafen);
     popup.claim(ctx.st, false);
 }
 
@@ -303,6 +372,8 @@ fn shortcuts(ctx: *d.Ctx) void {
     };
     if (K.on(kb, io, .tela_cheia, false)) ctx.act(.toggle_fullscreen);
     if (K.on(kb, io, .reiniciar, false)) ctx.act(.restart);
+    if (K.on(kb, io, .inspetor, false)) @import("../inspect/ui.zig").toggle();
+    if (K.on(kb, io, .inspetor_selecionar, false)) @import("../inspect/ui.zig").startPick();
     if (K.on(kb, io, .configuracoes, true)) ctx.act(if (ctx.st.settings.open) .close_settings else .open_settings);
     if (K.on(kb, io, .paleta, true)) {
         palette.commands_first = false;

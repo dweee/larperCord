@@ -499,6 +499,12 @@ fn gifPreviewsOn(app: *App) bool {
 fn gifPreviewsReset(app: *App) void {
     app.st.settings.gif_hosts = false;
 }
+fn clipsOff(_: *App) void {
+    @import("ui/gif_clips.zig").off = true;
+}
+fn clipsOn(_: *App) void {
+    @import("ui/gif_clips.zig").off = false;
+}
 
 // --- GIFs favoritos ----------------------------------------------------------------
 
@@ -651,7 +657,7 @@ fn scrollBottom(app: *App) void {
 }
 fn windowFullscreen(app: *App) bool {
     _ = c.SDL_SyncWindow(app.win.window);
-    return c.SDL_GetWindowFlags(app.win.window) & c.SDL_WINDOW_FULLSCREEN != 0;
+    return app.win.flags() & c.SDL_WINDOW_FULLSCREEN != 0;
 }
 fn windowNotFullscreen(app: *App) bool {
     return !windowFullscreen(app);
@@ -703,6 +709,8 @@ pub const ops_extras = [_]Op{
     .{ .expect = .{ .name = "e só baixa depois de confirmar", .check = ffmpegDone, .timeout_ms = 2000 } },
     key(c.ImGuiKey_Escape),
     s("seletor de GIFs"),
+    // O caminho da rede (os clipes dos favoritos têm a bateria deles, gif-clipes-a e -b).
+    .{ .run = clipsOff },
     click("composer"),
     .{ .text = "ainda escrevendo" },
     click("composer-gif"),
@@ -749,6 +757,7 @@ pub const ops_extras = [_]Op{
     .{ .shot = "gif-estrela-conversa" },
     .{ .click = .{ .dyn = tDemoGifStar } },
     .{ .expect = .{ .name = "e de novo tira", .check = msgGifUnstarred, .timeout_ms = 3000 } },
+    .{ .run = clipsOn },
     s("GIF longo toca aos poucos, com todos os quadros"),
     .{ .expect = .{ .name = "passou do limite: toca decodificando aos poucos em vez de juntar quadros", .check = longGifStreams, .timeout_ms = 10000 } },
     .{ .expect = .{ .name = "uma volta inteira mostra os 96 quadros, em ordem, 30 ms cada", .check = longGifFullLoop, .timeout_ms = 25000 } },
@@ -1323,9 +1332,14 @@ fn changelogReal(_: *App) bool {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const versions = changelog.parse(arena.allocator(), @embedFile("changelog_pt")) catch return false;
-    if (versions.len == 0 or versions[0].sections.len == 0) return false;
+    // A da versão instalada (uma seção da próxima versão, ainda sem número novo no app, fica
+    // para quando ela sair).
+    const cur = for (versions) |v| {
+        if (std.mem.eql(u8, v.name, updater.current)) break v;
+    } else return false;
+    if (cur.sections.len == 0) return false;
     var b: [128]u8 = undefined;
-    for (versions[0].sections) |sec| {
+    for (cur.sections) |sec| {
         if (sec.title.len == 0) continue;
         const k = std.fmt.bufPrint(&b, "changelog-section:{s}", .{sec.title}) catch return false;
         if (qa.find(k) == null) return false;

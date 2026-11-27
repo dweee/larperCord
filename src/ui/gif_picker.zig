@@ -2,6 +2,9 @@
 //! favoritos vêm das configurações da conta, e o GIF escolhido vai como o link dele, como
 //! no app oficial. As imagens ficam no Tenor: sem "Animar GIFs do Tenor e do Giphy" ligado,
 //! o app não fala com ele e o seletor pede a permissão antes.
+//!
+//! Na aba Favoritos, cada GIF que já tem clipe no disco (ui/gif_clips.zig) toca dele, todos
+//! ao mesmo tempo e sem ir à rede; a lista guardada aparece antes de a da conta chegar.
 const std = @import("std");
 const c = @import("c");
 const d = @import("draw.zig");
@@ -10,6 +13,7 @@ const i18n = @import("i18n.zig");
 const icons = @import("icons.zig");
 const popup = @import("popup.zig");
 const gif_fav = @import("gif_fav.zig");
+const gif_clips = @import("gif_clips.zig");
 const media_url = @import("../net/media_url.zig");
 const types = @import("../core/types.zig");
 const store_mod = @import("../core/store.zig");
@@ -69,21 +73,39 @@ fn drawCell(ctx: *d.Ctx, dl: *c.ImDrawList, g: types.Gif, i: usize, r: d.Rect, f
     const allowed = ctx.st.settings.gif_hosts;
     const still = if (g.preview.len > 0) g.preview else g.src;
     var drawn = false;
-    // Parado economiza memória: só anima o que está sob o mouse.
-    if (hovered and (allowed or !external(g.src))) switch (ctx.images.get(g.src, r.w * scale, r.h * scale)) {
-        .ready => |t| {
-            @import("embeds.zig").imageCover(dl, t, r, 1, 6, 0);
-            drawn = true;
+    // Favorito com clipe: toca dele, do disco, sem o mouse em cima e sem baixar nada. Sendo
+    // feito: espera (o GIF da rede seria baixado duas vezes).
+    var cb: [700]u8 = undefined;
+    const clip: gif_clips.Tile = if (favorites) gif_clips.tile(&cb, ctx.images, g.url, g.src, ctx.now_ms) else .none;
+    switch (clip) {
+        .clip => |file| switch (ctx.images.getClip(file, r.w * scale, r.h * scale)) {
+            .ready => |t| {
+                @import("embeds.zig").imageCover(dl, t, r, 1, 6, 0);
+                drawn = true;
+                qa.mark(r, "gif-clip:{d}", .{i});
+            },
+            .failed => gif_clips.bad(g.url, ctx.images),
+            .loading => {},
         },
-        else => {},
-    };
-    if (!drawn and (allowed or !external(still))) switch (if (g.preview.len > 0) ctx.images.get(still, r.w * scale, r.h * scale) else ctx.images.getStill(still, r.w * scale, r.h * scale)) {
-        .ready => |t| {
-            @import("embeds.zig").imageCover(dl, t, r, 1, 6, 0);
-            drawn = true;
+        .making => {},
+        .none => {
+            // Parado economiza memória: só anima o que está sob o mouse.
+            if (hovered and (allowed or !external(g.src))) switch (ctx.images.get(g.src, r.w * scale, r.h * scale)) {
+                .ready => |t| {
+                    @import("embeds.zig").imageCover(dl, t, r, 1, 6, 0);
+                    drawn = true;
+                },
+                else => {},
+            };
+            if (!drawn and (allowed or !external(still))) switch (if (g.preview.len > 0) ctx.images.get(still, r.w * scale, r.h * scale) else ctx.images.getStill(still, r.w * scale, r.h * scale)) {
+                .ready => |t| {
+                    @import("embeds.zig").imageCover(dl, t, r, 1, 6, 0);
+                    drawn = true;
+                },
+                else => {},
+            };
         },
-        else => {},
-    };
+    }
     if (!drawn) {
         const f = ctx.ui.get(.medium);
         _ = d.textClipped(dl, f, 12, r.x + 8, d.centerY(r, 12), ctx.col(.muted), nameOf(g), r.w - 16);
@@ -98,6 +120,16 @@ fn drawCell(ctx: *d.Ctx, dl: *c.ImDrawList, g: types.Gif, i: usize, r: d.Rect, f
         if (star_hb.?.clicked) gif_fav.toggle(ctx, g.url, g.src, g.width, g.height, on);
     }
     return hb.clicked;
+}
+
+/// A lista da conta; antes de ela chegar (ou sem rede), a guardada com os clipes, para a
+/// aba abrir na hora.
+fn favoritesList(ctx: *d.Ctx) store_mod.GifList {
+    const l = ctx.store.gif_favorites;
+    if (l.state == .ready) return l;
+    const saved = gif_clips.cachedList();
+    if (saved.len == 0) return l;
+    return .{ .req = l.req, .state = .ready, .items = saved };
 }
 
 fn send(ctx: *d.Ctx, g: types.Gif) void {
@@ -122,7 +154,11 @@ pub fn draw(ctx: *d.Ctx, x: f32, y: f32) void {
         const list = ctx.store.gif_results;
         // Em alta muda devagar: só pede de novo se a lista guardada for de uma busca.
         if (list.state == .none or list.state == .failed or listed[0] != 0) request(ctx, "");
+        // A lista dos favoritos uma vez por sessão: os clipes que faltam vão sendo feitos
+        // enquanto a pessoa olha os em alta.
+        if (ctx.store.gif_favorites.state == .none) ctx.act(.gif_favorites);
     }
+    gif_clips.scale = ctx.io.*.DisplayFramebufferScale.x;
     const wd: f32 = 420;
     const h = @min(@as(f32, 480), ctx.win.h - 16);
     const r = popup.fit(ctx, x - wd + 40, y - h - 8, wd, h);
@@ -190,11 +226,13 @@ pub fn draw(ctx: *d.Ctx, x: f32, y: f32) void {
     const sticker_fresh = stickerAppearing();
     if (stickers_tab) return @import("sticker_picker.zig").body(ctx, r, ty, q, sticker_fresh);
     const favorites = tab == 1 and !searching;
-    const list: store_mod.GifList = if (favorites) ctx.store.gif_favorites else ctx.store.gif_results;
+    const list: store_mod.GifList = if (favorites) favoritesList(ctx) else ctx.store.gif_results;
 
-    // Sem a permissão, não fala com o site de fora: explica e deixa ligar aqui mesmo.
+    // Sem a permissão, não fala com o site de fora: explica e deixa ligar aqui mesmo (o
+    // favorito com clipe não precisa do site).
     var needs_ok = false;
     if (!ctx.st.settings.gif_hosts) for (list.items) |g| {
+        if (favorites and gif_clips.has(g.url)) continue;
         if (external(if (g.preview.len > 0) g.preview else g.src)) {
             needs_ok = true;
             break;

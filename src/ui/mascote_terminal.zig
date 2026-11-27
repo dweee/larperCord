@@ -1544,6 +1544,31 @@ pub fn petTone(pl: PetLook) Rgba {
     return cols[0].mix(Rgba.hex(0xFFFFFF), 0.22);
 }
 
+/// O resumo de tudo o que `pet` lê para desenhar (fora o alpha, que a camada do
+/// invisível põe depois): o lugar, o tamanho, a pose, o visual de agora (com os desenhos
+/// de um arquivo), as cores e o relógio, se alguma peça mexe com ele. Mesmo resumo, mesmo
+/// desenho: o do canto parado é repetido sem refazer (ui/mascote_pet.zig). Quem mudar o
+/// que `pet` lê muda aqui junto.
+pub fn petKey(h: *std.hash.Wyhash, cx: f32, cy: f32, size: f32, pl: PetLook) void {
+    const carimbo = @import("carimbo.zig");
+    carimbo.feed(h, .{ cx, cy, size, lite, accent, colors });
+    inline for (@typeInfo(PetLook).@"struct".field_names) |name| {
+        if (comptime (std.mem.eql(u8, name, "alpha") or std.mem.eql(u8, name, "clock"))) continue;
+        carimbo.feed(h, @field(pl, name));
+    }
+    if (partes.movesWithClock(&look, size < 64)) carimbo.feed(h, pl.clock);
+    // O visual campo a campo; dos desenhos de um arquivo, só as formas e os pontos usados.
+    inline for (@typeInfo(visual.Look).@"struct".field_names) |name| {
+        if (comptime std.mem.eql(u8, name, "drawing")) continue;
+        carimbo.feed(h, @field(look, name));
+    }
+    if (look.drawing) |dw| {
+        carimbo.feed(h, .{ dw.variants, dw.defaults });
+        for (dw.shapesSlice()) |sh| carimbo.feed(h, sh);
+        for (dw.points[0..dw.n_points]) |q| carimbo.feed(h, q);
+    } else carimbo.feed(h, false);
+}
+
 /// O mascote do canto centrado em (cx, cy).
 pub fn pet(dl: *c.ImDrawList, cx: f32, cy: f32, size: f32, pl: PetLook) void {
     const k = size * 0.78 / body_w;

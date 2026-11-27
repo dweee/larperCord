@@ -25,6 +25,7 @@ const forum = @import("forum.zig");
 const thread_settings = @import("thread_settings.zig");
 const engine = @import("../plugins/engine.zig");
 const exportar_ui = @import("exportar.zig");
+const pastas_ui = @import("pastas.zig");
 
 const quick = [_][]const u8{ "👍", "😂", "😭", "🔥" };
 
@@ -144,6 +145,8 @@ fn popupKey(p: state.Popup) u64 {
         .tab_set_name => |t| 26 +% (if (t.rename) |i| @as(u64, i) + 1 else 0) *% 31,
         .lembrete => |t| 27 +% t.message *% 31 +% @as(u64, t.edit) *% 17,
         .exportar => |t| 27 +% t.channel *% 31,
+        .editar_imagem => |t| 28 +% @as(u64, t.index) *% 31,
+        .folder_settings => |t| 29 +% t.folder *% 31,
     };
 }
 
@@ -228,6 +231,8 @@ pub fn draw(ctx: *d.Ctx) void {
         .devices => |dv| @import("device_menu.zig").draw(ctx, dv.which, dv.x, dv.y),
         .tab_set_name => |t| @import("conjuntos.zig").drawName(ctx, t.rename),
         .exportar => |t| exportar_ui.drawDialog(ctx, t.channel),
+        .editar_imagem => |t| @import("editor_imagem.zig").draw(ctx, t.index),
+        .folder_settings => |t| pastas_ui.drawSettings(ctx, t.folder),
         .none => {},
     }
     animateOpen(ctx);
@@ -247,7 +252,7 @@ var delete_label: []const u8 = "";
 
 /// Canal de voz em que a pessoa está, se dá para movê-la de lá (é do
 /// servidor aberto e temos "Mover membros").
-fn movable(ctx: *d.Ctx, uid: Id) ?*const @import("../core/store.zig").ChannelState {
+pub fn movable(ctx: *d.Ctx, uid: Id) ?*const @import("../core/store.zig").ChannelState {
     const ch = ctx.store.voiceChannelOf(uid, ctx.st.guild);
     if (ch == 0) return null;
     const cs = ctx.store.channel(ch) orelse return null;
@@ -527,6 +532,11 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
             add(&items, &n, .{ .label = "Ver perfil", .en = "View Profile", .id = 84, .sep = true });
         },
         .pet => for (@import("mascote_pet.zig").menu_items, 1..) |it, i| add(&items, &n, .{ .label = it.pt, .en = it.en, .id = @intCast(i) }),
+        .folder => {
+            n += pastas_ui.folderItems(ctx, id, items[n..]);
+            if (n == 0) return close(ctx);
+        },
+        .folder_pick => n += pastas_ui.pickItems(ctx, id, items[n..]),
         .tabs => n += @import("conjuntos.zig").menuItems(ctx, items[n..], id),
         .notif => n += conta_menu.notifItems(ctx, id, items[n..]),
         .block_confirm => n += conta_menu.blockItems(ctx, id, items[n..]),
@@ -557,6 +567,7 @@ fn menu(ctx: *d.Ctx, kind: state.MenuKind, id: Id, x: f32, y: f32) void {
                 if (vg.banner != null) add(&items, &n, .{ .label = "Ver banner", .en = "View Banner", .id = 66 });
             }
             n += conta_menu.guildItems(ctx, id, items[n..]);
+            n += pastas_ui.guildItems(ctx, id, items[n..]);
             if (@import("moderacao.zig").podeVerBans(ctx, id)) add(&items, &n, .{ .label = "Banimentos", .en = "Bans", .id = @import("moderacao.zig").id_bans });
             if (dev) add(&items, &n, .{ .label = "Copiar ID do servidor", .en = "Copy Server ID", .id = 63 });
             // Quem é dono não pode sair: precisa passar o servidor antes.
@@ -761,6 +772,7 @@ fn choose(ctx: *d.Ctx, kind: state.MenuKind, id: Id, item: u8, r: d.Rect) void {
         return;
     }
     if (item >= 200) return pluginEntry(ctx, if (kind == .user) .user else .message, item - 200, id, r.x + r.w - 8, r.y + r.h - 70);
+    if ((kind == .folder or kind == .folder_pick or kind == .guild) and pastas_ui.choose(ctx, kind, id, item, r)) return;
     if (kind != .message and conta_menu.choose(ctx, kind, id, item, r)) return;
     if (kind == .voice_move and item >= 100) {
         var tb: [20]Id = undefined;

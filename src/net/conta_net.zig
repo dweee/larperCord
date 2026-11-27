@@ -307,6 +307,8 @@ fn readSettings(g: anytype, ar: std.mem.Allocator, quiet: bool) ?[]const u8 {
     }
     const v = std.json.parseFromSliceLeaky(Value, ar, resp.body.items, .{}) catch return null;
     const b64 = j.str(j.get(v, "settings")) orelse return null;
+    // A cópia das configurações que as pastas usam (net/pastas_net.zig) fica em dia.
+    g.settings1.remember(b64);
     // O texto pode apontar para a resposta, que vai embora aqui.
     return ar.dupe(u8, b64) catch null;
 }
@@ -321,6 +323,8 @@ fn writeSettings(g: anytype, ar: std.mem.Allocator, body: []const u8, what: []co
         return false;
     }
     const pv = std.json.parseFromSliceLeaky(Value, ar, presp.body.items, .{}) catch Value{ .null = {} };
+    // A resposta traz as configurações como estão: a cópia das pastas fica em dia.
+    if (j.str(j.get(pv, "settings"))) |st| g.settings1.remember(st);
     if (j.get(pv, "out_of_date")) |o| if (o == .bool and o.bool) {
         if (!quiet) g.notice("as configurações mudaram em outro aparelho: tente de novo", "the settings changed on another device: try again", .{});
         return false;

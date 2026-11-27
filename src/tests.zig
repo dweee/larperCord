@@ -6,9 +6,21 @@ const layout = @import("theme/layout.zig");
 
 test {
     _ = @import("net/retry.zig");
+    _ = @import("inspect/captura.zig");
+    _ = @import("inspect/registros.zig");
+    _ = @import("inspect/descreve.zig");
+    _ = @import("inspect/curl_insp.zig");
+    _ = @import("inspect/kit.zig");
+    _ = @import("inspect/json_view.zig");
+    _ = @import("inspect/doca.zig");
+    _ = @import("inspect/aba_gateway.zig");
+    _ = @import("inspect/aba_rede.zig");
+    _ = @import("inspect/aba_elementos.zig");
     _ = @import("core/resample.zig");
     _ = @import("core/plain_letters.zig");
     _ = @import("core/gif_favorites.zig");
+    _ = @import("core/pastas.zig");
+    _ = @import("core/gif_clipe.zig");
     _ = @import("core/gif_quadros.zig");
     _ = @import("core/entrada.zig");
     _ = @import("core/atalho_portal.zig");
@@ -18,6 +30,8 @@ test {
     _ = @import("core/types.zig");
     _ = @import("core/ritmo.zig");
     _ = @import("core/mem_use.zig");
+    _ = @import("core/mem_partes.zig");
+    _ = @import("platform/mem_mapa.zig");
     _ = @import("core/image_uri.zig");
     _ = @import("core/version.zig");
     _ = @import("core/atualizacao.zig");
@@ -38,8 +52,10 @@ test {
     _ = @import("core/aviso.zig");
     _ = @import("core/som_arquivo.zig");
     _ = @import("core/janela.zig");
+    _ = @import("core/ctl.zig");
     _ = @import("core/flutuante.zig");
     _ = @import("core/bandeja.zig");
+    _ = @import("core/notificacao.zig");
     _ = @import("core/ruido.zig");
     _ = @import("core/nivel.zig");
     _ = @import("core/lsp.zig");
@@ -68,6 +84,9 @@ test {
     _ = @import("core/reply_preview.zig");
     _ = @import("core/exportar.zig");
     _ = @import("core/salvar.zig");
+    _ = @import("core/png_escrita.zig");
+    _ = @import("core/metadados.zig");
+    _ = @import("core/imagem_edicao.zig");
     _ = @import("platform/pastas.zig");
     _ = @import("core/search_query.zig");
     _ = @import("core/busca_indice.zig");
@@ -76,6 +95,7 @@ test {
     _ = @import("core/debounce.zig");
     _ = @import("net/gw_budget.zig");
     _ = @import("net/member_ask.zig");
+    _ = @import("net/member_search.zig");
     _ = @import("core/voice_timer.zig");
     _ = @import("net/voice_info_json.zig");
     _ = @import("net/voz_movido.zig");
@@ -97,6 +117,7 @@ test {
     _ = @import("ui/mascote_contas.zig");
     _ = @import("ui/mascote_visual.zig");
     _ = @import("ui/mascote_reacoes.zig");
+    _ = @import("ui/carimbo.zig");
     _ = @import("ui/fuzzy.zig");
     _ = @import("ui/i18n.zig");
     _ = @import("ui/horario.zig");
@@ -120,6 +141,7 @@ test {
     _ = @import("net/read_state_json.zig");
     _ = @import("net/media_url.zig");
     _ = @import("net/proxy.zig");
+    _ = @import("net/enderecos.zig");
     _ = @import("net/challenge.zig");
     _ = @import("net/settings_proto.zig");
     _ = @import("net/status_proto.zig");
@@ -234,4 +256,10 @@ test "os dois CHANGELOGs têm as mesmas versões, com o mesmo tanto em cada seç
         try std.testing.expectEqual(a.sections.len, b.sections.len);
         for (a.sections, b.sections) |sa, sb| try std.testing.expectEqual(sa.items.len, sb.items.len);
     }
+    // A página de novidades marca cada título como "changelog-section:<título>" para o QA,
+    // numa chave de 56 bytes: um título maior some da varredura e o QA da página falha
+    // quando a versão dele vira a instalada.
+    for (pt) |v| for (v.sections) |sec| {
+        try std.testing.expect("changelog-section:".len + sec.title.len <= 56);
+    };
 }

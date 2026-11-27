@@ -195,7 +195,7 @@ fn quotaTake(q: *Quota, limit: u32, now: i64) bool {
 fn notify(ctx: *anyopaque, plugin: []const u8, text: []const u8, desktop: bool) void {
     const app: *App = @ptrCast(@alignCast(ctx));
     app.st.showToast(nowMs(), false, "{s}", "{s}", .{text});
-    const flags = c.SDL_GetWindowFlags(app.win.window);
+    const flags = app.win.flags();
     const hidden = flags & c.SDL_WINDOW_HIDDEN != 0;
     const focused = !hidden and flags & c.SDL_WINDOW_INPUT_FOCUS != 0 and !app.qa_blur;
     // Sem `desktop`, só com a pessoa longe da janela (e fora do modo foco, que

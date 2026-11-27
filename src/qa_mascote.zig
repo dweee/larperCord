@@ -3,7 +3,8 @@
 //! avisos; a pasta de ícones do usuário fica fora do QA), a tela de abertura
 //! desenha o Terminal em cada fase (abertura, conectando, erro, saída) e o
 //! Clássico continua o de antes, e a abertura do demo espera a animação inteira
-//! antes de sair para o app. Sozinho: QA_SUITE=mascote.
+//! antes de sair para o app. O mascote do canto parado, repetido sem refazer e igual
+//! pixel a pixel, fica em qa_mascote_repete.zig. Sozinho: QA_SUITE=mascote.
 const std = @import("std");
 const c = @import("c");
 const App = @import("app.zig").App;
@@ -662,6 +663,10 @@ fn paletteOpenPortal(app: *App) bool {
 fn portalReset(_: *App) void {
     pet.qa_portal = false;
 }
+/// O portal dura 0,8 s: num quadro lento (o CI) ele já pode ter acabado quando o QA olha.
+fn portalStarted(_: *App) bool {
+    return pet.activity() == .portal or pet.qa_portal;
+}
 fn paletteClosed(app: *App) bool {
     return !app.st.palette.open;
 }
@@ -1289,8 +1294,9 @@ pub const ops = [_]Op{
     .{ .hover = .{ .at = .{ .key = "composer", .fx = 0.95, .fy = -0.6 } } },
     .{ .expect = .{ .name = "a setinha parada perto dele: tenta pegar", .check = isAct(.grab), .timeout_ms = 4000 } },
     run(lifeReset),
+    run(portalReset),
     .{ .click = .{ .dyn = otherChannel } },
-    expect("trocou de canal: ele passa pelo portal junto", isAct(.portal)),
+    expect("trocou de canal: ele passa pelo portal junto", portalStarted),
     .{ .wait = 900 },
     run(openAThread),
     expect("abriu uma thread: ele espia", isAct(.peek)),
@@ -1630,7 +1636,7 @@ pub const ops = [_]Op{
     run(closeSettings),
     run(playReset),
     run(clearInput),
-
+} ++ @import("qa_mascote_repete.zig").ops ++ [_]Op{
     s("abertura do demo"),
     run(demoOpening),
     expect("conectado, a abertura espera a animação acabar", waitsForIntro),

@@ -71,7 +71,7 @@ pub fn collect(a: std.mem.Allocator, s: *const Store) !format.Snapshot {
         .roles = roles.items,
         .my_roles = mine.items,
         .reads = reads.items,
-        .folders = s.folders,
+        .folders = s.folders_server,
         .relations = rels.items,
         .muted = muted.items,
         .faces = faces.items,

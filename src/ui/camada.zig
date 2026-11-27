@@ -10,7 +10,12 @@
 //! para a tela, o callback desenha a lista na textura (cada textura do SDL_Renderer tem
 //! o próprio corte e a própria escala, e o alvo de antes volta no fim) e a imagem logo
 //! depois cobre o lugar, com alpha pré-multiplicado. O canto da textura cai num pixel
-//! inteiro: o desenho opaco sai igual ao desenhado direto na tela.
+//! inteiro: o desenho opaco sai no mesmo lugar do desenhado direto na tela.
+//!
+//! O desenho que não mudou não é refeito: `end` recebe o resumo dele (ui/carimbo.zig), e
+//! enquanto o resumo for o mesmo, `reuse` põe só a imagem da textura que já está pronta.
+//! A textura só vale depois de desenhada (o callback rodou), e sai junto com o
+//! renderizador (a janela na bandeja) ou quando o SDL avisa que os alvos se perderam.
 const std = @import("std");
 const c = @import("c");
 const d = @import("draw.zig");
@@ -30,11 +35,28 @@ pub const Layer = struct {
     tex_h: f32 = 0,
     /// As cores dos vértices como o SDL quer (float).
     colors: std.ArrayList(c.SDL_FColor) = .empty,
-    /// Resumo do desenho do último quadro (o quadro igual pode ser pulado; ver `takeChanged`).
-    sum: u64 = 0,
     listed: bool = false,
     /// O desenho deste quadro está pronto para o callback.
     armed: bool = false,
+    /// O que está na textura: o resumo do desenho e onde a imagem dele vai (vale depois
+    /// que o callback desenhou). `pend_*`: o deste quadro, esperando o callback.
+    key: u64 = 0,
+    img: Img = .{},
+    valid: bool = false,
+    pend_key: u64 = 0,
+    pend_img: Img = .{},
+    /// Quantas vezes a textura pronta foi reaproveitada (o QA confere).
+    hits: u64 = 0,
+
+    /// A textura pronta tem o desenho com o resumo `key`: só a imagem dela vai para `dl`,
+    /// com `alpha`. Falso: desenhe (`begin` e `end`).
+    pub fn reuse(l: *Layer, dl: *c.ImDrawList, renderer: ?*c.SDL_Renderer, key: u64, alpha: f32) bool {
+        if (!l.valid or l.key != key or renderer == null or l.renderer != renderer or l.tex == null) return false;
+        l.armed = false;
+        l.hits +%= 1;
+        if (alpha > 0.002) image(l, dl, l.img, alpha);
+        return true;
+    }
 
     /// Começa: a lista em que desenhar, com o corte e a textura de `dl`. Null sem
     /// SDL_Renderer: quem chama desenha direto, com o alpha em cada peça.
@@ -63,9 +85,10 @@ pub const Layer = struct {
         return &l.list;
     }
 
-    /// Fecha e põe o desenho em `dl` com `alpha`. Sem textura (o renderer recusou),
-    /// as peças vão direto para `dl` com o alpha em cada uma, como antes.
-    pub fn end(l: *Layer, dl: *c.ImDrawList, alpha: f32) void {
+    /// Fecha e põe o desenho em `dl` com `alpha`; `key` é o resumo dele (ver `reuse`).
+    /// Sem textura (o renderer recusou), as peças vão direto para `dl` com o alpha em
+    /// cada uma, como antes.
+    pub fn end(l: *Layer, dl: *c.ImDrawList, alpha: f32, key: u64) void {
         const list = &l.list;
         const nv: usize = @intCast(list.VtxBuffer.Size);
         if (nv == 0 or alpha <= 0.002) return;
@@ -105,19 +128,29 @@ pub const Layer = struct {
         for (cmdSlice(list)) |*cmd| {
             cmd.ClipRect = .{ .x = cmd.ClipRect.x * sx - px0, .y = cmd.ClipRect.y * sy - py0, .z = cmd.ClipRect.z * sx - px0, .w = cmd.ClipRect.w * sy - py0 };
         }
-        var sum = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(vtx));
-        sum = std.hash.Wyhash.hash(sum, std.mem.sliceAsBytes(list.IdxBuffer.Data[0..@intCast(list.IdxBuffer.Size)]));
-        if (sum != l.sum) changed = true;
-        l.sum = sum;
+        // A textura vai mudar: o quadro precisa ir para a tela (o callback só roda lá).
+        changed = true;
         l.armed = true;
-        const tex = l.tex.?;
-        c.ImDrawList_AddCallbackEx(dl, &render, l, 0);
-        const a8: u32 = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255 + 0.5);
+        l.pend_key = key;
         const ox = px0 / sx;
         const oy = py0 / sy;
-        c.ImDrawList_AddImageEx(dl, fx.refOf(tex), d.v(ox, oy), d.v(ox + w / sx, oy + h / sy), d.v(0, 0), d.v(w / l.tex_w, h / l.tex_h), a8 | a8 << 8 | a8 << 16 | a8 << 24);
+        l.pend_img = .{ .p0 = d.v(ox, oy), .p1 = d.v(ox + w / sx, oy + h / sy), .uv1 = d.v(w / l.tex_w, h / l.tex_h) };
+        c.ImDrawList_AddCallbackEx(dl, &render, l, 0);
+        image(l, dl, l.pend_img, alpha);
     }
 };
+
+/// Onde a imagem da textura vai na tela, e até onde da textura ela pega.
+const Img = struct {
+    p0: c.ImVec2 = .{ .x = 0, .y = 0 },
+    p1: c.ImVec2 = .{ .x = 0, .y = 0 },
+    uv1: c.ImVec2 = .{ .x = 0, .y = 0 },
+};
+
+fn image(l: *Layer, dl: *c.ImDrawList, im: Img, alpha: f32) void {
+    const a8: u32 = @intFromFloat(std.math.clamp(alpha, 0, 1) * 255 + 0.5);
+    c.ImDrawList_AddImageEx(dl, fx.refOf(l.tex.?), im.p0, im.p1, d.v(0, 0), im.uv1, a8 | a8 << 8 | a8 << 16 | a8 << 24);
+}
 
 fn cmdSlice(list: *c.ImDrawList) []c.ImDrawCmd {
     return list.CmdBuffer.Data[0..@intCast(list.CmdBuffer.Size)];
@@ -163,6 +196,7 @@ fn dropTexture(l: *Layer) void {
     l.tex = null;
     l.tex_w = 0;
     l.tex_h = 0;
+    l.valid = false;
 }
 
 /// Na hora de desenhar (dentro de ImGui_ImplSDLRenderer3_RenderDrawData): a lista da
@@ -176,6 +210,11 @@ fn render(parent: [*c]const c.ImDrawList, cmd: [*c]const c.ImDrawCmd) callconv(.
     const prev = c.SDL_GetRenderTarget(r);
     if (!c.SDL_SetRenderTarget(r, tex)) return;
     defer _ = c.SDL_SetRenderTarget(r, prev);
+    // A partir daqui a textura tem o desenho deste quadro (até o próximo `end`).
+    l.armed = false;
+    l.key = l.pend_key;
+    l.img = l.pend_img;
+    l.valid = true;
     var dc: [4]f32 = .{ 0, 0, 0, 0 };
     _ = c.SDL_GetRenderDrawColorFloat(r, &dc[0], &dc[1], &dc[2], &dc[3]);
     _ = c.SDL_SetRenderDrawColorFloat(r, 0, 0, 0, 0);
@@ -237,6 +276,22 @@ fn replay(l: *Layer, dl: *c.ImDrawList, alpha: f32) void {
             c.ImDrawList_PrimWriteVtx(dl, vt.pos, vt.uv, (vt.col & 0x00FF_FFFF) | a << 24);
         }
         for (idx) |i| c.ImDrawList_PrimWriteIdx(dl, @intCast(at + i - lo));
+    }
+}
+
+/// O SDL avisou que o conteúdo dos alvos se perdeu (SDL_EVENT_RENDER_TARGETS_RESET,
+/// SDL_EVENT_RENDER_DEVICE_RESET): as texturas ficam, mas o desenho é refeito.
+pub fn invalidate() void {
+    for (live[0..n_live]) |l| l.valid = false;
+}
+
+/// O renderizador vai embora (a janela na bandeja, App.releaseGpu): as texturas das
+/// camadas saem e são refeitas no renderizador novo no próximo `begin`.
+pub fn dropTextures() void {
+    for (live[0..n_live]) |l| {
+        dropTexture(l);
+        l.renderer = null;
+        l.armed = false;
     }
 }
 

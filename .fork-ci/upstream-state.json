@@ -1,8 +1,8 @@
 {
   "release": {
-    "id": 450808089,
-    "sha": "7f2814a982fa4ab8f1e8e85ea157d266d58161c3",
-    "tag": "v0.6.7"
+    "id": 457670783,
+    "sha": "b7f425e89ac62730c38d4a9310a845c8e10b8d31",
+    "tag": "v0.6.8"
   },
   "track": "release",
   "upstream": "RshaCuDeVidro/larperCord",

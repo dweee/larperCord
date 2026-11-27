@@ -122,7 +122,7 @@ fn onCall(app: *App, cl: ev.Call) void {
 fn notify(app: *App, ch: Id) void {
     chamada.notified +%= 1;
     if (app.opts.qa or app.store.demo) return;
-    const flags = c.SDL_GetWindowFlags(app.win.window);
+    const flags = app.win.flags();
     const hidden = flags & c.SDL_WINDOW_HIDDEN != 0;
     const focused = !hidden and flags & c.SDL_WINDOW_INPUT_FOCUS != 0;
     if (focused) return;

@@ -12,6 +12,7 @@ const fx = @import("fx.zig");
 const Store = @import("../core/store.zig").Store;
 const Action = @import("../core/event.zig").Action;
 const State = @import("state.zig").State;
+const insp = @import("../inspect/captura.zig");
 
 pub const Rgba = theme_mod.Rgba;
 pub const Rect = layout.Rect;
@@ -125,16 +126,19 @@ pub fn v(x: f32, y: f32) c.ImVec2 {
 
 pub fn rect(dl: *c.ImDrawList, r: Rect, color: Rgba, rounding: f32) void {
     if (color.a <= 0.001) return;
+    if (insp.recording()) insp.fill(dl, r, color.u(), rounding);
     c.ImDrawList_AddRectFilledEx(dl, v(r.x, r.y), v(r.x + r.w, r.y + r.h), color.u(), rounding, 0);
 }
 
 pub fn rectFlags(dl: *c.ImDrawList, r: Rect, color: Rgba, rounding: f32, flags: c_int) void {
     if (color.a <= 0.001) return;
+    if (insp.recording()) insp.fill(dl, r, color.u(), rounding);
     c.ImDrawList_AddRectFilledEx(dl, v(r.x, r.y), v(r.x + r.w, r.y + r.h), color.u(), rounding, flags);
 }
 
 pub fn border(dl: *c.ImDrawList, r: Rect, color: Rgba, rounding: f32, thickness: f32) void {
     if (color.a <= 0.001) return;
+    if (insp.recording()) insp.border(dl, r, color.u(), rounding);
     const h = thickness / 2;
     c.ImDrawList_AddRectEx(dl, v(r.x + h, r.y + h), v(r.x + r.w - h, r.y + r.h - h), color.u(), rounding, thickness, 0);
 }
@@ -234,6 +238,8 @@ pub fn textDir(dl: *c.ImDrawList, font: *c.ImFont, size: f32, x: f32, y: f32, co
     // Mantém o texto centrado na linha quando a escala muda.
     const dy = (size - sz) * 0.6;
     c.ImDrawList_AddTextImFontPtrEx(dl, font, sz, v(@round(x), @round(y + dy)), color.u(), b, b + t.len, 0, null);
+    // O Inspetor guarda o texto como se lê (não na ordem visual do bidi), com a largura de verdade.
+    if (insp.recording()) insp.text(dl, font, sz, @round(x), @round(y + dy), c.ImFont_CalcTextSizeAEx(font, sz, std.math.floatMax(f32), 0, b, b + t.len, null).x, color.u(), s);
 }
 
 /// Quantos bytes de `s` cabem em `max_w`, sem partir um caractere (busca
@@ -390,10 +396,12 @@ fn hitEx(ctx: *Ctx, id: usize, r: Rect, under: bool) Hit {
     // O botão do ImGui dispara ao soltar, com qualquer botão do mouse; o direito e o
     // do meio já tiveram a ação deles ao apertar.
     const other_up = c.ImGui_IsMouseReleased(c.ImGuiMouseButton_Right) or c.ImGui_IsMouseReleased(c.ImGuiMouseButton_Middle);
+    const real_click = clicked and !middle and !right and !other_up;
+    if (insp.recording()) insp.hit(id, hovered, held, real_click);
     c.ImGui_PopID();
     if (hovered) c.ImGui_SetMouseCursor(c.ImGuiMouseCursor_Hand);
     if (hovered) ctx.hot = true;
-    return .{ .hovered = hovered, .clicked = clicked and !middle and !right and !other_up, .held = held, .middle = middle, .right = right, .ctrl = ctx.io.*.KeyCtrl };
+    return .{ .hovered = hovered, .clicked = real_click, .held = held, .middle = middle, .right = right, .ctrl = ctx.io.*.KeyCtrl };
 }
 
 /// Clique direto pelo mouse, para o que fica por cima de uma região com

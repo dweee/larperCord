@@ -1,6 +1,7 @@
 //! Spoiler e texto alternativo dos arquivos da bandeja, antes de enviar: os
 //! dois botões no cartão de cada arquivo e a janelinha do texto alternativo.
-//! Vão no envio como `SPOILER_` no nome e `description` do anexo.
+//! Vão no envio como `SPOILER_` no nome e `description` do anexo. Numa imagem
+//! parada, também o Editar (cortar e esconder pedaços: ui/editor_imagem.zig).
 const std = @import("std");
 const c = @import("c");
 const d = @import("draw.zig");
@@ -22,9 +23,20 @@ pub fn cardButtons(ctx: *d.Ctx, dl: *c.ImDrawList, i: usize, u: *Upload, pr: d.R
     if (u.spoiler) {
         d.rect(dl, pr, ctx.col(.rail).alpha(0.88), 4);
         const t = "SPOILER";
-        d.text(dl, fam.get(.bold), 10.5, pr.x + (pr.w - d.width(fam.get(.bold), 10.5, t)) / 2, pr.y + 12, ctx.col(.text), t);
+        // Com o Editar no canto de cima, o aviso desce um pouco.
+        d.text(dl, fam.get(.bold), 10.5, pr.x + (pr.w - d.width(fam.get(.bold), 10.5, t)) / 2, pr.y + if (u.editavel) @as(f32, 25) else 12, ctx.col(.text), t);
     }
     const radius: f32 = 4;
+    if (u.editavel) {
+        const label = i18n.tr("Editar", "Edit");
+        const er: d.Rect = .{ .x = pr.x + 3, .y = pr.y + 3, .w = @min(d.width(fam.get(.bold), 10.5, label) + 12, pr.w - 6), .h = 18 };
+        const eh = d.hit(ctx, 0x7580 + i, er);
+        qa.mark(er, "upload-edit:{d}", .{i});
+        d.rect(dl, er, ctx.col(.overlay).alpha(if (eh.hovered) 1 else 0.85), radius);
+        _ = d.textClipped(dl, fam.get(.bold), 10.5, er.x + 6, d.centerY(er, 10.5), ctx.col(.text), label, er.w - 8);
+        d.tip(ctx, er, i18n.tr("Cortar e esconder partes da imagem", "Crop and hide parts of the image"), eh.hovered);
+        if (eh.clicked) @import("editor_imagem.zig").abrir(ctx, i);
+    }
     // ALT: aceso quando já tem texto.
     const ar: d.Rect = .{ .x = pr.x + 3, .y = pr.bottom() - 21, .w = 30, .h = 18 };
     const ah = d.hit(ctx, 0x7400 + i, ar);

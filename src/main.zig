@@ -40,12 +40,14 @@ const usage =
     \\  --lang IDIOMA     pt, en, ja ou ru (ignora as configurações)
     \\  --no-live         desliga as mensagens automáticas do modo demonstração
     \\  --stats           mostra a linha do tempo da abertura e o custo de cada quadro
+    \\  --inspect         abre com o Inspetor (F12) aberto e gravando desde o começo
     \\  --voice-test G C  entra no canal de voz C do servidor G por 25 s
     \\  --tls-check URL   confere se a rede do app funciona neste sistema (certificados e WebSocket)
     \\  --tls-fingerprint mostra a impressão TLS e HTTP/2 das conexões do app (tools/tls_check.sh)
     \\  --ws-check [URL]  abre o WebSocket do gateway sem conta e mostra o primeiro quadro (HELLO)
     \\  --restarted       toma o lugar do larperCord que está fechando (usado ao reiniciar)
     \\  --version         mostra a versão e sai
+    \\  ctl COMANDO       controla o larperCord aberto (larpercord ctl help)
     \\
     \\atalhos: Ctrl+K paleta · Ctrl+, configurações · F2 próximo tema
     \\         Ctrl+Tab abas · Alt+1..9 · Ctrl+W fecha aba
@@ -75,6 +77,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     @import("platform/mem_tune.zig").init();
     // Tira o token antes de copiar o ambiente para o Zig e antes de qualquer filho.
     discord.takeEnvToken();
+    // O SDL e o OpenSSL alocam pelas funções que contam (platform/mem_contas.zig): antes de
+    // qualquer alocação deles.
+    @import("platform/mem_contas.zig").instalar();
     keepEnvironCopy();
     sys.init();
     var opts: Options = .{};
@@ -82,7 +87,18 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var it = if (sys.windows) try std.process.Args.Iterator.initAllocator(init.args, std.heap.c_allocator) else std.process.Args.Iterator.init(init.args);
     _ = it.skip();
     while (it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--theme")) {
+        if (std.mem.eql(u8, arg, "ctl")) {
+            // `larpercord ctl …`: fala com o larperCord aberto e sai (ctl_cli.zig), sem SDL
+            // nem janela.
+            var rest: [64][]const u8 = undefined;
+            var n: usize = 0;
+            while (it.next()) |a| {
+                if (n == rest.len) return fail("ctl: argumentos demais");
+                rest[n] = a;
+                n += 1;
+            }
+            std.process.exit(@import("ctl_cli.zig").main(rest[0..n]));
+        } else if (std.mem.eql(u8, arg, "--theme")) {
             opts.theme = it.next() orelse return fail("--theme precisa de um nome");
         } else if (std.mem.eql(u8, arg, "--shot")) {
             opts.shot = (it.next() orelse return fail("--shot precisa de um arquivo")).ptr;
@@ -124,6 +140,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             opts.settings = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
             opts.stats = true;
+        } else if (std.mem.eql(u8, arg, "--inspect")) {
+            opts.inspect = true;
         } else if (std.mem.eql(u8, arg, "--tls-check")) {
             return tlsCheck(it.next() orelse return fail("--tls-check precisa de um endereço"));
         } else if (std.mem.eql(u8, arg, "--ws-check")) {
@@ -139,6 +157,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         } else if (@import("builtin").mode == .debug and !sys.windows and std.mem.eql(u8, arg, "--qa-lsp-server")) {
             // O servidor de linguagem de mentira do QA (src/qa_lsp_server.zig), só em debug.
             @import("qa_lsp_server.zig").run(it.next() orelse return fail("--qa-lsp-server precisa de um modo"));
+        } else if (@import("ui/qa.zig").compiled and !sys.windows and std.mem.eql(u8, arg, "--qa-notif-server")) {
+            // O servidor de notificações de mentira do QA (src/qa_notif_server.zig).
+            const caps = it.next() orelse return fail("--qa-notif-server precisa das capacidades e do arquivo do registro");
+            const log = it.next() orelse return fail("--qa-notif-server precisa das capacidades e do arquivo do registro");
+            @import("qa_notif_server.zig").run(caps, log);
         } else if (!sys.windows and std.mem.eql(u8, arg, "--tray-helper")) {
             // Só o próprio app chama (platform/tray.zig): é o processo do ícone da bandeja.
             const open = it.next() orelse return fail("--tray-helper precisa de dois rótulos");
@@ -178,6 +201,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         },
     };
 
+    // O controle de fora (app_ctl.zig): no app de verdade, com a opção ligada; na
+    // demonstração, no QA e nos prints, só com LARPER_CTL, num arquivo da porta que não
+    // pisa no de um larperCord aberto.
+    opts.ctl = if (single) .app else if (c.SDL_getenv("LARPER_CTL") != null) .demo else .off;
+
     if (opts.stats) timeline.begin();
     const app = try App.create(std.heap.c_allocator, opts);
     instance.listen(app.win.wake_type);
@@ -199,14 +227,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 /// Na saída padrão, como em todo programa: quem empacota ou confere uma instalação lê com
-/// $(larpercord --version). No Windows o app não tem console, então a linha só aparece com
-/// a saída redirecionada (o GetStdHandle vem nulo e a escrita não faz nada).
+/// $(larpercord --version). No Windows o app não tem console: a linha vai para onde a
+/// saída foi redirecionada ou, sem isso, para o terminal que chamou (ctl_cli.zig).
 fn printVersion() void {
-    const line = "larperCord " ++ @import("build_options").version ++ "\n";
-    if (sys.windows) {
-        var n: c.DWORD = 0;
-        _ = c.WriteFile(c.GetStdHandle(c.STD_OUTPUT_HANDLE), line.ptr, line.len, &n, null);
-    } else _ = c.write(1, line.ptr, line.len);
+    _ = @import("ctl_cli.zig").write(.out, "larperCord " ++ @import("build_options").version ++ "\n");
 }
 
 /// O curl do app contra um endereço qualquer, sem conta nenhuma: confere os certificados

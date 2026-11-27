@@ -8,7 +8,9 @@ pub const Settings = @import("settings_state.zig").Settings;
 /// `voice_move`: os canais de voz para onde dá para mover alguém (id = a pessoa).
 /// `plugin_choices`: a segunda lista de uma entrada de plugin (id = a mensagem ou a pessoa).
 /// `tabs`: o botão direito na barra de abas, com os conjuntos de abas (ui/conjuntos.zig).
-pub const MenuKind = enum { message, user, channel, guild, status, voice_move, thread_delete, guild_leave, plugin_choices, notif, block_confirm, group_leave, pet, tabs };
+/// `folder`: o botão direito numa pasta da barra (id = a pasta); `folder_pick`: as
+/// pastas de "Adicionar à pasta…" (id = o servidor; ui/pastas.zig).
+pub const MenuKind = enum { message, user, channel, guild, status, voice_move, thread_delete, guild_leave, plugin_choices, notif, block_confirm, group_leave, pet, tabs, folder, folder_pick };
 
 /// O que o menu rápido de dispositivos mostra (ui/device_menu.zig).
 pub const DeviceMenu = enum { mic, out, both };
@@ -54,6 +56,8 @@ pub const Popup = union(enum) {
     compose_options: struct { x: f32, y: f32 },
     /// Texto alternativo de um arquivo da bandeja (ui/upload_opts.zig).
     upload_alt: struct { index: u8, x: f32, y: f32 },
+    /// Cortar e esconder pedaços de uma imagem da bandeja (ui/editor_imagem.zig).
+    editar_imagem: struct { index: u8 },
     /// Status personalizado: texto, emoji e até quando (ui/custom_status.zig).
     custom_status: struct { x: f32, y: f32 },
     /// Pessoas de um grupo de DM: tirar e pôr gente (ui/group_dm.zig).
@@ -70,6 +74,8 @@ pub const Popup = union(enum) {
     tab_set_name: struct { rename: ?usize = null },
     /// "Exportar conversa…" (ui/exportar.zig).
     exportar: struct { channel: Id },
+    /// Nome e cor de uma pasta da barra de servidores (ui/pastas.zig).
+    folder_settings: struct { folder: u64 },
 };
 
 /// Seleção de texto entre mensagens: âncora e cabeça (mensagem + byte).
@@ -115,6 +121,9 @@ pub const Upload = struct {
     spoiler: bool = false,
     /// Texto alternativo (c_allocator; vazio = nenhum).
     alt: []u8 = &.{},
+    /// Uma imagem parada que o editor abre (JPEG, PNG sem animação, BMP): ganha o
+    /// botão Editar no cartão (ui/editor_imagem.zig).
+    editavel: bool = false,
 
     pub fn name(u: *const Upload) []const u8 {
         return std.fs.path.basename(u.path);

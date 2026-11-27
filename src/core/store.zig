@@ -13,6 +13,7 @@ const envio = @import("envio.zig");
 const thread_edit = @import("thread_edit.zig");
 const mencao = @import("mencao.zig");
 const dm_order = @import("dm_order.zig");
+const pastas = @import("pastas.zig");
 const Id = types.Id;
 
 /// LARPER_READ_DEBUG: conta no log por que cada canal ficou não lido (só IDs).
@@ -47,7 +48,10 @@ pub const StoredMessage = struct {
     original: ?[]const u8 = null,
     /// Dia local da mensagem (para os separadores), calculado uma vez pela interface.
     day: i64 = std.math.minInt(i64),
-    reactions: [8]types.Reaction = @splat(.{}),
+    /// As reações (até `max_reactions`), num bloco próprio que só existe quando a mensagem
+    /// tem alguma (`Store.addReaction`): a maioria não tem, e as oito guardadas no lugar
+    /// custavam 384 bytes em cada mensagem na memória.
+    reacoes: ?*[max_reactions]types.Reaction = null,
     n_reactions: u8 = 0,
     /// Cache das palavras de alerta/filtro que o texto contém (core/filtros.zig).
     flt_key: u32 = 0,
@@ -64,8 +68,23 @@ pub const StoredMessage = struct {
     /// Veio do cache em disco (ver `loadCached`), não do servidor.
     from_cache: bool = false,
 
+    pub const max_reactions = 8;
+
     pub fn reactionSlice(m: *const StoredMessage) []const types.Reaction {
-        return m.reactions[0..m.n_reactions];
+        const r = m.reacoes orelse return &.{};
+        return r[0..m.n_reactions];
+    }
+
+    fn reactionsMut(m: *StoredMessage) []types.Reaction {
+        const r = m.reacoes orelse return &.{};
+        return r[0..m.n_reactions];
+    }
+
+    /// Tira a reação `i` (a ordem das outras fica).
+    fn removeReaction(m: *StoredMessage, i: usize) void {
+        const r = m.reacoes orelse return;
+        std.mem.copyForwards(types.Reaction, r[i .. m.n_reactions - 1], r[i + 1 .. m.n_reactions]);
+        m.n_reactions -= 1;
     }
 };
 
@@ -277,6 +296,8 @@ fn freeGifs(items: []types.Gif) void {
     if (items.len > 0) ev_alloc.free(items);
 }
 
+pub const PendingFolderOp = struct { seq: u32, op: pastas.Op };
+
 pub const Store = struct {
     gpa: std.mem.Allocator,
     me: Id = 0,
@@ -336,8 +357,15 @@ pub const Store = struct {
     /// nem procura o reloginho.
     algum_castigo: bool = false,
     relationships: std.AutoHashMapUnmanaged(Id, types.Relationship) = .empty,
-    /// Pastas e ordem dos servidores (vazio = a ordem em que vieram).
+    /// Pastas e ordem dos servidores como a barra mostra (vazio = a ordem em que
+    /// vieram): as da conta com as mudanças feitas aqui que ainda não voltaram gravadas.
     folders: []types.GuildFolder = &.{},
+    /// As pastas como a conta guarda: o último que veio do Discord (READY, outro
+    /// aparelho, a resposta de uma gravação).
+    folders_server: []types.GuildFolder = &.{},
+    /// Mudanças nas pastas feitas aqui e ainda sem resposta (app_pastas.zig), em ordem.
+    folder_ops: std.ArrayList(PendingFolderOp) = .empty,
+    folder_seq: u32 = 0,
     /// Perfis completos já buscados (e a bio já interpretada).
     profiles: std.AutoHashMapUnmanaged([2]Id, types.Profile) = .empty,
     /// Muda quando `profiles` é esvaziado (dá para pedir os perfis de novo).
@@ -451,6 +479,8 @@ pub const Store = struct {
         s.faces.deinit(s.gpa);
         s.relationships.deinit(s.gpa);
         freeFolders(s.folders);
+        freeFolders(s.folders_server);
+        s.folder_ops.deinit(s.gpa);
         var pi = s.profiles.valueIterator();
         while (pi.next()) |pr| freeProfile(pr.*);
         s.profiles.deinit(s.gpa);
@@ -644,6 +674,23 @@ pub const Store = struct {
         s.gpa.free(m.spans);
         s.freeEmbedSpans(m.embed_spans);
         if (m.original) |o| ev_alloc.free(o);
+        if (m.reacoes) |r| s.gpa.destroy(r);
+        m.reacoes = null;
+        m.n_reactions = 0;
+    }
+
+    /// Põe mais uma reação na mensagem (o bloco delas nasce com a primeira). false = já tem
+    /// `max_reactions` (como antes, a nona não aparece) ou faltou memória.
+    pub fn addReaction(s: *Store, m: *StoredMessage, r: types.Reaction) bool {
+        if (m.n_reactions >= StoredMessage.max_reactions) return false;
+        const block = m.reacoes orelse blk: {
+            const b = s.gpa.create([StoredMessage.max_reactions]types.Reaction) catch return false;
+            m.reacoes = b;
+            break :blk b;
+        };
+        block[m.n_reactions] = r;
+        m.n_reactions += 1;
+        return true;
     }
 
     fn freeRaw(m: types.Message) void {
@@ -1197,12 +1244,14 @@ pub const Store = struct {
     pub fn apply(s: *Store, ev: Event, now_ms: i64) !void {
         // O que chega o tempo todo e não aparece na caixa de entrada não conta.
         switch (ev) {
-            .typing_start, .presence_update, .member_face, .voice_state, .voice_member_flags, .voice_speaking, .voice_ping, .voice_audio, .voice_status, .call, .channel_info, .voice_start, .latency, .status, .net_fail, .notice, .member_list, .profile, .relationship, .note, .app_icon, .pins, .pins_changed, .invite, .read, .thread_members, .thread_joined, .thread_open, .threads_page, .conta => {},
+            .typing_start, .presence_update, .member_face, .voice_state, .voice_member_flags, .voice_speaking, .voice_ping, .voice_audio, .voice_status, .call, .channel_info, .voice_start, .latency, .status, .net_fail, .notice, .member_list, .profile, .relationship, .note, .app_icon, .pins, .pins_changed, .invite, .read, .thread_members, .thread_joined, .thread_open, .threads_page, .conta, .member_search => {},
             else => s.rev +%= 1,
         }
         switch (ev) {
             // Quem cuida é a busca (ver App.afterEvent).
             .search_results, .invite_joined, .invite_created, .conta, .bans => {},
+            // Quem cuida é o autocompletar (ui/autocomplete.zig): os membros já vieram antes.
+            .member_search => {},
             // O castigo aparece na hora (a lista de membros confirma depois).
             .moderated => |m| if (m.ok and (m.acao == .timeout or m.acao == .untimeout))
                 s.setTimeout(m.guild, m.user, if (m.acao == .timeout) m.ate_s else 0),
@@ -1447,16 +1496,12 @@ pub const Store = struct {
             .reaction_set => |rs| {
                 const cs = s.channel(rs.channel) orelse return;
                 const m = s.find(cs, rs.id) orelse return;
-                for (m.reactions[0..m.n_reactions]) |*r| if (r.same(&rs.reaction)) {
+                for (m.reactionsMut()) |*r| if (r.same(&rs.reaction)) {
                     r.* = rs.reaction;
                     m.layout_w = -1;
                     return;
                 };
-                if (m.n_reactions < m.reactions.len) {
-                    m.reactions[m.n_reactions] = rs.reaction;
-                    m.n_reactions += 1;
-                    m.layout_w = -1;
-                }
+                if (s.addReaction(m, rs.reaction)) m.layout_w = -1;
             },
             .user_upsert => |u| {
                 if (s.users.getPtr(u.id)) |old| {
@@ -1590,10 +1635,9 @@ pub const Store = struct {
                 const cs = s.channel(rc.channel) orelse return;
                 const m = s.find(cs, rc.id) orelse return;
                 if (rc.emoji) |e| {
-                    for (m.reactions[0..m.n_reactions], 0..) |*r, i| {
+                    for (m.reactionsMut(), 0..) |*r, i| {
                         if (!r.same(&e)) continue;
-                        std.mem.copyForwards(types.Reaction, m.reactions[i .. m.n_reactions - 1], m.reactions[i + 1 .. m.n_reactions]);
-                        m.n_reactions -= 1;
+                        m.removeReaction(i);
                         break;
                     }
                 } else {
@@ -1753,8 +1797,20 @@ pub const Store = struct {
                 try s.putFace(mr.guild, mr.user, .{}, false, false);
             },
             .guild_folders => |list| {
-                freeFolders(s.folders);
-                s.folders = list;
+                freeFolders(s.folders_server);
+                s.folders_server = list;
+                s.refreshFolders();
+            },
+            .folders_saved => |fs| {
+                // As mudanças até `seq` já foram (gravadas ou não): saem da fila.
+                var k: usize = 0;
+                while (k < s.folder_ops.items.len and s.folder_ops.items[k].seq <= fs.seq) k += 1;
+                s.folder_ops.replaceRangeAssumeCapacity(0, k, &.{});
+                if (fs.folders) |list| {
+                    freeFolders(s.folders_server);
+                    s.folders_server = list;
+                }
+                s.refreshFolders();
             },
             .profile => |pr| {
                 // Teto de perfis guardados: passando, esquece todos (são
@@ -2117,6 +2173,80 @@ pub const Store = struct {
         _ = s.nick_gens.remove(guild_id);
     }
 
+    /// Os servidores na ordem em que vieram (alocado com o c_allocator).
+    fn guildIds(s: *const Store) ![]Id {
+        const out = try ev_alloc.alloc(Id, s.guilds.items.len);
+        for (s.guilds.items, out) |g, *o| o.* = g.id;
+        return out;
+    }
+
+    /// A barra de novo: as pastas da conta com as mudanças daqui que ainda esperam
+    /// resposta (sem memória, fica como estava).
+    fn refreshFolders(s: *Store) void {
+        const next = blk: {
+            if (s.folder_ops.items.len == 0) {
+                const out = ev_alloc.alloc(types.GuildFolder, s.folders_server.len) catch return;
+                var n: usize = 0;
+                for (s.folders_server) |f| {
+                    const name = ev_alloc.dupe(u8, f.name) catch break;
+                    const guilds = ev_alloc.dupe(Id, f.guilds) catch {
+                        ev_alloc.free(name);
+                        break;
+                    };
+                    out[n] = .{ .id = f.id, .name = name, .color = f.color, .guilds = guilds };
+                    n += 1;
+                }
+                if (n < out.len) {
+                    freeFolders(out[0..n]);
+                    if (n == 0) ev_alloc.free(out);
+                    return;
+                }
+                break :blk out;
+            }
+            const known = s.guildIds() catch return;
+            defer ev_alloc.free(known);
+            const ops = ev_alloc.alloc(pastas.Op, s.folder_ops.items.len) catch return;
+            defer ev_alloc.free(ops);
+            for (s.folder_ops.items, ops) |p, *o| o.* = p.op;
+            break :blk pastas.applyAll(ev_alloc, s.folders_server, known, ops) catch return;
+        };
+        freeFolders(s.folders);
+        s.folders = next;
+    }
+
+    /// Uma mudança feita aqui (arrastar, menus): a barra muda na hora. Devolve o número
+    /// dela, ou null se não muda nada (nada a gravar).
+    pub fn editFolders(s: *Store, op: pastas.Op) !?u32 {
+        const known = try s.guildIds();
+        defer ev_alloc.free(known);
+        const cur = try pastas.applyAll(ev_alloc, s.folders, known, &.{});
+        defer freeFolders(cur);
+        const next = try pastas.applyAll(ev_alloc, s.folders, known, &.{op});
+        if (pastas.same(cur, next)) {
+            freeFolders(next);
+            return null;
+        }
+        s.folder_ops.append(s.gpa, .{ .seq = s.folder_seq +% 1, .op = op }) catch |e| {
+            freeFolders(next);
+            return e;
+        };
+        s.folder_seq +%= 1;
+        freeFolders(s.folders);
+        s.folders = next;
+        return s.folder_seq;
+    }
+
+    /// A pasta onde o servidor está na barra (0 = solto).
+    pub fn folderOf(s: *const Store, g: Id) u64 {
+        return pastas.folderOf(s.folders, g);
+    }
+
+    pub fn folderById(s: *const Store, id: u64) ?*const types.GuildFolder {
+        if (id == 0) return null;
+        for (s.folders) |*f| if (f.id == id) return f;
+        return null;
+    }
+
     /// Servidores na ordem da barra lateral: primeiro os que não estão na
     /// lista de pastas (novos, como faz o Discord), depois a ordem dela.
     /// Cada item é um servidor solto ou uma pasta.
@@ -2323,10 +2453,9 @@ pub const Store = struct {
 
     /// Soma ou tira uma reação. `mine` indica se foi a gente.
     pub fn react(s: *Store, m: *StoredMessage, emoji: types.Reaction, mine: bool, add: bool) void {
-        _ = s;
         // Super reação: conta no total e nas super, sem mexer no nosso `me` (o da normal).
         const burst = emoji.burst > 0;
-        for (m.reactions[0..m.n_reactions], 0..) |*r, i| if (r.same(&emoji)) {
+        for (m.reactionsMut(), 0..) |*r, i| if (r.same(&emoji)) {
             if (add) {
                 if (mine and r.me and !burst) return;
                 r.count +|= 1;
@@ -2335,22 +2464,17 @@ pub const Store = struct {
                 if (mine and !r.me and !burst) return;
                 r.count -|= 1;
                 if (burst) r.burst -|= 1 else if (mine) r.me = false;
-                if (r.count == 0) {
-                    std.mem.copyForwards(types.Reaction, m.reactions[i .. m.n_reactions - 1], m.reactions[i + 1 .. m.n_reactions]);
-                    m.n_reactions -= 1;
-                }
+                if (r.count == 0) m.removeReaction(i);
             }
             m.layout_w = -1;
             return;
         };
-        if (!add or m.n_reactions >= m.reactions.len) return;
+        if (!add) return;
         var r = emoji;
         r.count = 1;
         r.me = mine and !burst;
         r.burst = @intFromBool(burst);
-        m.reactions[m.n_reactions] = r;
-        m.n_reactions += 1;
-        m.layout_w = -1;
+        if (s.addReaction(m, r)) m.layout_w = -1;
     }
 
     /// A enquete mudou: a mensagem refaz a altura (o cartão de votar troca o parado).
@@ -2538,11 +2662,9 @@ pub const Store = struct {
                 continue;
             };
             sm.from_cache = true;
-            if (i < reactions.len) {
-                const rs = reactions[i][0..@min(reactions[i].len, sm.reactions.len)];
-                @memcpy(sm.reactions[0..rs.len], rs);
-                sm.n_reactions = @intCast(rs.len);
-            }
+            if (i < reactions.len) for (reactions[i]) |r| {
+                if (!s.addReaction(&sm, r)) break;
+            };
             fresh.appendAssumeCapacity(sm);
         }
         // As que chegaram ao vivo antes de abrir ficam depois (sem repetir).
@@ -2583,6 +2705,7 @@ pub const Store = struct {
     var budget_tick: u32 = 0;
 
     fn enforceBudget(s: *Store, now_ms: i64) void {
+        s.compactar(now_ms);
         while (true) {
             var total: usize = 0;
             var victim: ?*ChannelState = null;
@@ -2595,6 +2718,19 @@ pub const Store = struct {
             }
             if (total <= s.message_budget) return;
             s.unload(victim orelse return);
+        }
+    }
+
+    /// A lista de mensagens das conversas fora da tela há 30 s fica do tamanho exato: o que
+    /// chega ao vivo cresce a lista em 50% de cada vez, e essa folga ficava reservada para
+    /// sempre (com centenas de canais abertos numa sessão, megabytes).
+    fn compactar(s: *Store, now_ms: i64) void {
+        var it = s.channels.valueIterator();
+        while (it.next()) |p| {
+            const cs = p.*;
+            const n = cs.messages.items.len;
+            if (now_ms - cs.seen_ms < 30_000 or cs.messages.capacity <= n + n / 8 + 4) continue;
+            cs.messages.shrinkAndFree(s.gpa, n);
         }
     }
 
@@ -2938,8 +3074,8 @@ test "reações, edição e exclusão" {
     try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = r, .user = 2, .add = true } }, 0);
     try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = r, .user = 1, .add = true } }, 0);
     const m = s.find(s.channel(10).?, 7).?;
-    try std.testing.expectEqual(@as(u16, 2), m.reactions[0].count);
-    try std.testing.expect(m.reactions[0].me);
+    try std.testing.expectEqual(@as(u16, 2), m.reactionSlice()[0].count);
+    try std.testing.expect(m.reactionSlice()[0].me);
 
     try s.editLocal(10, 7, "editado **agora**", null);
     try std.testing.expect(m.msg.edited);
@@ -2957,6 +3093,62 @@ fn pollStore(s: *Store) !void {
     try s.apply(.{ .message_create = .{ .id = 7, .channel = 10, .author = 2, .timestamp = 0, .content = try c_alloc.dupe(u8, "oi") } }, 0);
 }
 
+test "reações num bloco próprio: só a mensagem com reação paga, e o bloco sai junto com ela" {
+    const c_alloc = std.heap.c_allocator;
+    // A lista guarda uma StoredMessage por mensagem: as reações fora dela (antes eram 384 bytes
+    // de oito reações em cada uma, quase sempre vazias).
+    try std.testing.expect(@sizeOf(StoredMessage) <= 288);
+    var s = Store.init(std.testing.allocator);
+    defer s.deinit();
+    const chans = try c_alloc.alloc(types.Channel, 1);
+    chans[0] = .{ .id = 10, .guild = 5, .name = try c_alloc.dupe(u8, "g"), .topic = try c_alloc.dupe(u8, "") };
+    try s.apply(.{ .ready = .{ .me = 1, .users = try c_alloc.alloc(types.User, 0), .guilds = try c_alloc.alloc(types.Guild, 0), .channels = chans, .voice = try c_alloc.alloc([2]Id, 0) } }, 0);
+    try s.apply(.{ .message_create = .{ .id = 7, .channel = 10, .author = 2, .timestamp = 0, .content = try c_alloc.dupe(u8, "oi") } }, 0);
+    try s.apply(.{ .message_create = .{ .id = 8, .channel = 10, .author = 2, .timestamp = 0, .content = try c_alloc.dupe(u8, "sem reação") } }, 0);
+    const emojis = [_][]const u8{ "👍", "😂", "❤️", "🔥", "😭", "👀", "🎉", "💀", "🙏" };
+    for (emojis) |e| try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = types.Reaction.init(e), .user = 2, .add = true } }, 0);
+    const cs = s.channel(10).?;
+    const m = s.find(cs, 7).?;
+    // Até oito, como antes: a nona não entra.
+    try std.testing.expectEqual(@as(usize, StoredMessage.max_reactions), m.reactionSlice().len);
+    for (m.reactionSlice()) |r| try std.testing.expect(!std.mem.eql(u8, r.text(), "🙏"));
+    try std.testing.expect(s.find(cs, 8).?.reacoes == null);
+    // Tirar uma do meio mantém a ordem das outras.
+    try s.apply(.{ .reaction_clear = .{ .channel = 10, .id = 7, .emoji = types.Reaction.init("😂") } }, 0);
+    try std.testing.expectEqual(@as(usize, 7), m.reactionSlice().len);
+    try std.testing.expectEqualStrings("👍", m.reactionSlice()[0].text());
+    try std.testing.expectEqualStrings("❤️", m.reactionSlice()[1].text());
+    // Apagada, a mensagem leva o bloco (o alocador do teste acusa se sobrar).
+    try s.apply(.{ .message_delete = .{ .channel = 10, .id = 7 } }, 0);
+    try std.testing.expect(s.find(cs, 7) == null);
+}
+
+test "conversa fora da tela há 30 s fica com a lista de mensagens do tamanho exato" {
+    const c_alloc = std.heap.c_allocator;
+    var s = Store.init(std.testing.allocator);
+    defer s.deinit();
+    const chans = try c_alloc.alloc(types.Channel, 2);
+    chans[0] = .{ .id = 10, .guild = 5, .name = try c_alloc.dupe(u8, "a"), .topic = try c_alloc.dupe(u8, "") };
+    chans[1] = .{ .id = 11, .guild = 5, .name = try c_alloc.dupe(u8, "b"), .topic = try c_alloc.dupe(u8, "") };
+    try s.apply(.{ .ready = .{ .me = 1, .users = try c_alloc.alloc(types.User, 0), .guilds = try c_alloc.alloc(types.Guild, 0), .channels = chans, .voice = try c_alloc.alloc([2]Id, 0) } }, 0);
+    // Ao vivo, uma por uma: a lista cresce com folga.
+    for (0..45) |i| {
+        try s.apply(.{ .message_create = .{ .id = 100 + i, .channel = 10, .author = 2, .timestamp = 0, .content = try c_alloc.dupe(u8, "x") } }, 0);
+        try s.apply(.{ .message_create = .{ .id = 200 + i, .channel = 11, .author = 2, .timestamp = 0, .content = try c_alloc.dupe(u8, "y") } }, 0);
+    }
+    const a = s.channel(10).?;
+    const b = s.channel(11).?;
+    try std.testing.expect(a.messages.capacity > a.messages.items.len + 4);
+    // A 10 apareceu na tela agora; a 11, há um minuto.
+    a.seen_ms = 60_000;
+    b.seen_ms = 0;
+    s.enforceBudget(60_000);
+    try std.testing.expectEqual(b.messages.items.len, b.messages.capacity);
+    try std.testing.expectEqual(@as(usize, 45), b.messages.items.len);
+    try std.testing.expect(a.messages.capacity > a.messages.items.len + 4);
+    try std.testing.expectEqualStrings("y", b.messages.items[44].msg.content);
+}
+
 test "super reações contam à parte e não mexem no nosso voto normal" {
     var s = Store.init(std.testing.allocator);
     defer s.deinit();
@@ -2966,13 +3158,13 @@ test "super reações contam à parte e não mexem no nosso voto normal" {
     try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = burst, .user = 1, .add = true } }, 0);
     try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = types.Reaction.init("🔥"), .user = 1, .add = true } }, 0);
     const m = s.find(s.channel(10).?, 7).?;
-    try std.testing.expectEqual(@as(u16, 2), m.reactions[0].count);
-    try std.testing.expectEqual(@as(u16, 1), m.reactions[0].burst);
-    try std.testing.expect(m.reactions[0].me);
+    try std.testing.expectEqual(@as(u16, 2), m.reactionSlice()[0].count);
+    try std.testing.expectEqual(@as(u16, 1), m.reactionSlice()[0].burst);
+    try std.testing.expect(m.reactionSlice()[0].me);
     try s.apply(.{ .reaction = .{ .channel = 10, .id = 7, .emoji = burst, .user = 1, .add = false } }, 0);
-    try std.testing.expectEqual(@as(u16, 1), m.reactions[0].count);
-    try std.testing.expectEqual(@as(u16, 0), m.reactions[0].burst);
-    try std.testing.expect(m.reactions[0].me);
+    try std.testing.expectEqual(@as(u16, 1), m.reactionSlice()[0].count);
+    try std.testing.expectEqual(@as(u16, 0), m.reactionSlice()[0].burst);
+    try std.testing.expect(m.reactionSlice()[0].me);
 }
 
 test "enquete: chega à parte, conta os votos e some com a mensagem" {

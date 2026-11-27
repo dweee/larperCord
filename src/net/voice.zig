@@ -28,6 +28,7 @@ const sys = @import("../platform/sys.zig");
 const c = @import("c");
 const types = @import("../core/types.zig");
 const ev = @import("../core/event.zig");
+const insp = @import("../inspect/registros.zig");
 const Sink = @import("fake_gateway.zig").Sink;
 const i18n = @import("../ui/i18n.zig");
 const j = @import("jsonx.zig");
@@ -534,7 +535,17 @@ const Worker = struct {
     }
 
     fn sendText(w: *Worker, text: []const u8) bool {
-        return w.sendFrame_(c.CURLWS_TEXT, text);
+        const ok = w.sendFrame_(c.CURLWS_TEXT, text);
+        if (ok) insp.gwOut(.voice, text);
+        return ok;
+    }
+
+    /// Quadro binário do DAVE no Inspetor: o op e o tamanho (o conteúdo é chave e MLS).
+    fn inspBinary(dir: insp.Dir, opcode: u8, len: usize) void {
+        if (!insp.gravando()) return;
+        var b: [80]u8 = undefined;
+        const line = std.fmt.bufPrint(&b, "{{\"binario\":true,\"op\":{d},\"bytes\":{d}}}", .{ opcode, len }) catch return;
+        insp.gw.add(.voice, dir, line, opcode, null, null);
     }
 
     fn sendBinary(w: *Worker, opcode: u8, payload: []const u8) bool {
@@ -544,6 +555,7 @@ const Worker = struct {
         buf.appendAssumeCapacity(opcode);
         buf.appendSliceAssumeCapacity(payload);
         dbg("enviou binário op {d} ({d} bytes)", .{ opcode, payload.len });
+        inspBinary(.out, opcode, payload.len);
         return w.sendFrame_(c.CURLWS_BINARY, buf.items);
     }
 
@@ -609,6 +621,8 @@ const Worker = struct {
                 if (flags & c.CURLWS_TEXT != 0) {
                     w.onText(bytes);
                 } else if (flags & c.CURLWS_BINARY != 0) {
+                    // seq (2 bytes) e o op vêm antes do conteúdo.
+                    if (bytes.len >= 3) inspBinary(.in, bytes[2], bytes.len - 3);
                     w.onBinary(bytes);
                 }
             }
@@ -652,6 +666,7 @@ const Worker = struct {
         const root = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), text, .{}) catch return;
         if (j.int(j.get(root, "seq"))) |s| w.last_seq = s;
         const op = j.int(j.get(root, "op")) orelse return;
+        if (insp.gravando()) insp.gw.add(.voice, .in, text, op, j.int(j.get(root, "seq")), null);
         const d = j.get(root, "d") orelse std.json.Value{ .null = {} };
         if (op != 6) dbg("op {d}", .{op});
         switch (op) {
