@@ -5,12 +5,12 @@
     nixpkgs.url = "github:NixOS/nixpkgs/2786a2a72088ecf32aea5b3ec52099e6a7cff78f";
     # Only used by the module checks; consumers do not need it.
     home-manager = {
-      url = "github:nix-community/home-manager/361da94fb55c67094ec47322d2757d6616a0de92";
+      url = "github:nix-community/home-manager/54f903fdaaf5d5720ed36706fe75332af69eb793";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Only used by the nix-darwin module check.
     nix-darwin = {
-      url = "github:nix-darwin/nix-darwin/663d8b962a11cda261b6e9f14e03911fac94baf0";
+      url = "github:nix-darwin/nix-darwin/594c680c429be020d7130cc2b17d43c4760d17c7";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
